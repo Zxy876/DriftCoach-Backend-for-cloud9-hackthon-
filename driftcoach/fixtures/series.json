@@ -1,0 +1,8 @@
+[
+	{
+		"series_id": "SER_01",
+		"tournament_id": "T_001",
+		"teams": ["TEAM_A", "TEAM_B"],
+		"status": "FINISHED"
+	}
+]

@@ -1,0 +1,14 @@
+[
+	{
+		"player_id": "P_A1",
+		"kast": 0.72,
+		"free_death_rate": 0.18,
+		"rounds": 50
+	},
+	{
+		"player_id": "P_B1",
+		"kast": 0.68,
+		"free_death_rate": 0.12,
+		"rounds": 50
+	}
+]
