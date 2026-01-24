@@ -41,4 +41,6 @@ driftcoach/
 ## Quickstart (mock dry-run)
 1. 安装依赖：`pip install -r requirements.txt`
 2. 运行：`python3 -m driftcoach.main`
-3. 预期：打印已注册方法及基于 `fixtures/states.json` 的 DerivedFact 结果；当样本不足或缺字段时会显示 `[SKIP]`/`[NO RESULT]`。
+3. 预期：
+	- 打印已注册方法及基于 `fixtures/states.json` 的 DerivedFact 结果；当样本不足或缺字段时会显示 `[SKIP]`/`[NO RESULT]`。
+	- 基于已生成的 DerivedFact 组装示例输出：`[INSIGHT]`、`[REVIEW]`、`[WHAT-IF]`（仅结构化占位，无自然语言渲染）。
