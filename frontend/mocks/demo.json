@@ -1,0 +1,68 @@
+{
+  "context": {
+    "player": "PlayerA",
+    "team": "TeamX",
+    "match": "match-001",
+    "map": "Ascent",
+    "timestamp": "2026-01-25T10:00:00Z",
+    "source": "mock",
+    "window": "last 10 rounds"
+  },
+  "insights": [
+    {
+      "subject": "PlayerA",
+      "claim": "在进攻 A short 夹击时胜率高于基线",
+      "derivedFacts": [
+        {
+          "factType": "agg_win_rate",
+          "value": 0.62,
+          "baseline": 0.48,
+          "sampleSize": 25,
+          "metadata": {
+            "condition": "attack_a_short_split",
+            "metric": "win_rate"
+          }
+        }
+      ],
+      "confidence": 0.72,
+      "failureConditions": ["sample<10 => drop"]
+    }
+  ],
+  "review": [
+    {
+      "matchId": "match-001",
+      "topic": "防守 B 点 retake 协同不足",
+      "statesInvolved": ["state_17", "state_19"],
+      "evidence": [
+        {
+          "factType": "retake_trade_rate",
+          "value": 0.21,
+          "baseline": 0.45,
+          "sampleSize": 14,
+          "metadata": {
+            "metric": "trade_rate",
+            "phase": "retake"
+          }
+        }
+      ],
+      "confidence": 0.55
+    }
+  ],
+  "whatIf": {
+    "state": "state_21",
+    "actions": ["SAVE", "RETAKE"],
+    "outcomes": {
+      "SAVE": {
+        "win_prob": 0.94,
+        "support": 15,
+        "insufficient_support": false
+      },
+      "RETAKE": {
+        "win_prob": 0.23,
+        "support": 15,
+        "insufficient_support": false
+      }
+    },
+    "confidence": 0.41
+  }
+}
