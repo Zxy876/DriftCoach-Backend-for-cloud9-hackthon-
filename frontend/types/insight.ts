@@ -13,4 +13,5 @@ export type Insight = {
   confidence: number; // 0-1
   failureConditions: string[];
   explanation?: string; // LLM-rendered text (frontend layer), optional
+  explanationTrace?: import("../llm/trace").ExplanationTrace;
 };

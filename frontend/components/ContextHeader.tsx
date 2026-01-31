@@ -6,6 +6,7 @@ export type ContextHeaderProps = {
 
 export function ContextHeader({ context }: ContextHeaderProps) {
   const { player, team, match, map, timestamp, source, window } = context;
+  const dataSource = source.startsWith("grid") ? (source === "grid-fallback" ? "GRID API · Limited Sample" : "GRID API") : "Mock Demo";
   return (
     <header style={styles.wrapper}>
       <div style={styles.row}>
@@ -22,7 +23,7 @@ export function ContextHeader({ context }: ContextHeaderProps) {
       </div>
       <div style={styles.row}>
         <span style={styles.label}>Source</span>
-        <span>{source}</span>
+        <span>{dataSource}</span>
       </div>
       <div style={styles.row}>
         <span style={styles.label}>Window</span>

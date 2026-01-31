@@ -7,4 +7,5 @@ export type ReviewAgendaItem = {
   evidence: DerivedFact[];
   confidence: number; // 0-1
   explanation?: string; // optional LLM rendering
+  explanationTrace?: import("../llm/trace").ExplanationTrace;
 };

@@ -7,9 +7,11 @@ from driftcoach.analysis.trigger import is_eligible
 from driftcoach.analysis.methods.econ_cascade import EconCascade
 from driftcoach.analysis.methods.free_death import FreeDeathImpact
 from driftcoach.analysis.methods.objective_fail import ObjectiveFail
+from driftcoach.analysis.methods.distribution_insight import DistributionInsightMethod
 from driftcoach.core.state import State
 from driftcoach.core.action import Action
 from driftcoach.outputs.insight import Insight
+from driftcoach.outputs.distribution_insight import DistributionInsight
 from driftcoach.outputs.review_item import ReviewAgendaItem
 from driftcoach.outputs.what_if import WhatIfOutcome
 from driftcoach.llm.interpreter import interpret
@@ -24,6 +26,7 @@ def build_registry() -> AnalysisRegistry:
     registry.register(FreeDeathImpact())
     registry.register(EconCascade())
     registry.register(ObjectiveFail())
+    registry.register(DistributionInsightMethod())
     return registry
 
 
@@ -110,6 +113,10 @@ def _build_outputs(states: list[State], derived_facts, action_map: dict[str, Act
         what_if_obj = _build_what_if_with_similarity(states, action_map)
         if what_if_obj:
             outputs.append(what_if_obj)
+
+    dist_insight = next((f for name, f in derived_facts if name == "distribution_insight"), None)
+    if isinstance(dist_insight, DistributionInsight):
+        outputs.append(dist_insight)
 
     return outputs
 

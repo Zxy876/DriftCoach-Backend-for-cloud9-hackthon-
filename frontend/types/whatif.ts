@@ -12,4 +12,5 @@ export type WhatIfOutcome = {
   outcomes: Record<Action, WhatIfPayload>;
   confidence: number; // overall confidence 0-1
   explanation?: string; // optional LLM rendering
+  explanationTrace?: import("../llm/trace").ExplanationTrace;
 };

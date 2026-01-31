@@ -1,120 +1,138 @@
-import type { Insight } from "../types/insight";
-import type { ReviewAgendaItem } from "../types/review";
-import type { WhatIfOutcome, Action } from "../types/whatif";
+import type React from "react";
+import type { SessionAnalysis, SessionAnalysisNode } from "../types/context";
 
 export type AnalysisPanelsProps = {
-  insights: Insight[];
-  review: ReviewAgendaItem[];
-  whatIf: WhatIfOutcome;
+  analysis?: SessionAnalysis;
 };
 
-export function AnalysisPanels({ insights, review, whatIf }: AnalysisPanelsProps) {
+export function AnalysisPanels({ analysis }: AnalysisPanelsProps) {
+  if (!analysis) return null;
+  const { analysis_nodes = [], entities, recently_added_node_ids = [] } = analysis;
+  const isNew = new Set(recently_added_node_ids || []);
+  const seriesCount = (entities?.series || []).length;
+  const gamesCount = analysis_nodes.reduce((acc, node) => {
+    const meta = node.metadata || {};
+    if (node.type === "SERIES_SAMPLE") {
+      return Math.max(acc, Number(meta.sample_size) || 0);
+    }
+    return acc;
+  }, 0);
+
   return (
     <section style={styles.wrapper}>
-      <div style={styles.panel}>
-        <h3 style={styles.title}>Player Insight</h3>
-        {insights.map((insight, idx) => {
-          const fact = insight.derivedFacts[0];
-          return (
-            <div key={idx} style={styles.card}>
-              <div style={styles.row}><strong>Claim</strong><span>{insight.claim}</span></div>
-              <div style={styles.row}><span>Value</span><span>{fact.value.toFixed(2)}</span></div>
-              <div style={styles.row}><span>Baseline</span><span>{fact.baseline ?? "n/a"}</span></div>
-              <div style={styles.row}><span>Δ vs baseline</span><span>{fact.baseline !== null && fact.baseline !== undefined ? (fact.value - fact.baseline).toFixed(2) : "n/a"}</span></div>
-              <div style={styles.row}><span>Sample</span><span>{fact.sampleSize}</span></div>
-              <div style={styles.row}><span>Confidence</span><span>{formatConfidence(insight.confidence)}</span></div>
-              <div style={styles.row}><span>Explanation</span><span>{insight.explanation ?? "(LLM off / template)"}</span></div>
-            </div>
-          );
-        })}
+      <div style={styles.header}>
+        <div>
+          <h3 style={styles.title}>Analysis Feedback</h3>
+          <p style={styles.subtitle}>每次提问都在增加节点</p>
+        </div>
+        <div style={styles.badges}>
+          <span style={styles.badge}>Series {seriesCount}</span>
+          <span style={styles.badge}>Games {gamesCount}</span>
+          <span style={styles.badge}>Nodes {analysis_nodes.length}</span>
+        </div>
       </div>
-
-      <div style={styles.panel}>
-        <h3 style={styles.title}>Post-match Review</h3>
-        {review.map((item, idx) => {
-          const fact = item.evidence[0];
-          return (
-            <div key={idx} style={styles.card}>
-              <div style={styles.row}><strong>Agenda</strong><span>{item.topic}</span></div>
-              <div style={styles.row}><span>Why</span><span>{fact.factType}</span></div>
-              <div style={styles.row}><span>Evidence</span><span>{fact.value.toFixed(2)} (baseline {fact.baseline ?? "n/a"}, n={fact.sampleSize})</span></div>
-              <div style={styles.row}><span>States</span><span>{item.statesInvolved.join(", ")}</span></div>
-              <div style={styles.row}><span>Confidence</span><span>{formatConfidence(item.confidence)}</span></div>
-              <div style={styles.row}><span>Explanation</span><span>{item.explanation ?? "(LLM off / template)"}</span></div>
-            </div>
-          );
-        })}
-      </div>
-
-      <div style={styles.panel}>
-        <h3 style={styles.title}>What-if Analysis</h3>
-        <div style={styles.card}>
-          <div style={styles.row}><strong>State</strong><span>{whatIf.state}</span></div>
-          <div style={{ ...styles.row, fontWeight: 600 }}>
-            <span>Action</span>
-            <span>Win Prob / n</span>
-          </div>
-          {whatIf.actions.map((action: Action) => {
-            const payload = whatIf.outcomes[action];
-            const insuff = payload?.insufficient_support;
-            const win = payload?.win_prob;
-            const support = payload?.support ?? 0;
+      <div style={styles.list}>
+        {analysis_nodes.length === 0 ? (
+          <div style={styles.empty}>暂无分析节点</div>
+        ) : (
+          analysis_nodes.map((node: SessionAnalysisNode) => {
+            const highlight = isNew.has(node.node_id);
             return (
-              <div key={action} style={styles.row}>
-                <span>{action}</span>
-                <span>
-                  {insuff || win === null ? "insufficient" : win?.toFixed(2)}
-                  {" "}(n={support})
-                </span>
+              <div
+                key={node.node_id}
+                style={{
+                  ...styles.card,
+                  borderColor: highlight ? "#22c55e" : "#e5e7eb",
+                  boxShadow: highlight ? "0 0 0 1px #22c55e33" : "none",
+                }}
+              >
+                <div style={styles.cardHeader}>
+                  <div style={styles.nodeType}>{node.type}</div>
+                  <div style={styles.nodeSource}>{node.source}</div>
+                </div>
+                <div style={styles.row}>首次提问：{node.created_from_query}</div>
+                <div style={styles.row}>最近更新：{node.last_updated_at}</div>
               </div>
             );
-          })}
-          <div style={styles.row}><span>Overall confidence</span><span>{formatConfidence(whatIf.confidence)}</span></div>
-          <div style={styles.row}><span>Explanation</span><span>{whatIf.explanation ?? "(LLM off / template)"}</span></div>
-        </div>
+          })
+        )}
       </div>
     </section>
   );
 }
 
-function formatConfidence(conf: number): string {
-  const clamped = Math.max(0, Math.min(conf, 1));
-  if (clamped >= 0.75) return `${clamped.toFixed(2)} (strong)`;
-  if (clamped >= 0.5) return `${clamped.toFixed(2)} (moderate)`;
-  return `${clamped.toFixed(2)} (weak)`;
-}
-
 const styles: Record<string, React.CSSProperties> = {
   wrapper: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-    gap: "16px",
     marginTop: "16px",
+    padding: "16px",
+    border: "1px solid #e5e7eb",
+    borderRadius: "12px",
+    background: "#fff",
+    boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
   },
-  panel: {
+  header: {
     display: "flex",
-    flexDirection: "column",
-    gap: "8px",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: "12px",
   },
   title: {
     margin: 0,
     fontSize: "16px",
     color: "#0f172a",
   },
+  subtitle: {
+    margin: 0,
+    fontSize: "13px",
+    color: "#475569",
+  },
+  badges: {
+    display: "flex",
+    gap: "8px",
+  },
+  badge: {
+    padding: "6px 10px",
+    borderRadius: "999px",
+    background: "#f0fdf4",
+    color: "#16a34a",
+    fontWeight: 600,
+    fontSize: "13px",
+    border: "1px solid #bbf7d0",
+  },
+  list: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+    gap: "12px",
+  },
   card: {
     border: "1px solid #e5e7eb",
-    borderRadius: "8px",
+    borderRadius: "10px",
     padding: "12px",
     display: "flex",
     flexDirection: "column",
     gap: "6px",
-    background: "#fff",
+    background: "#fcfcfc",
   },
-  row: {
+  cardHeader: {
     display: "flex",
     justifyContent: "space-between",
-    gap: "8px",
-    fontSize: "14px",
-    color: "#1f2937",
+    alignItems: "center",
+  },
+  nodeType: {
+    fontWeight: 700,
+    color: "#0ea5e9",
+    fontSize: "13px",
+  },
+  nodeSource: {
+    fontSize: "12px",
+    color: "#0f172a",
+  },
+  row: {
+    fontSize: "12px",
+    color: "#111827",
+  },
+  empty: {
+    fontSize: "13px",
+    color: "#94a3b8",
   },
 };
