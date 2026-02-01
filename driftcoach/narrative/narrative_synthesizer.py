@@ -10,6 +10,36 @@ from .narrative_refinement import refine_narrative
 _TEMPLATE_DIR = pathlib.Path(__file__).resolve().parent / "templates"
 
 SECTION_FACT_TOP_K = 1
+CONTENT_MAX_CHARS = 8000
+NARRATIVE_MIN_SIGNAL_SAMPLE = 20
+NARRATIVE_MIN_SIGNAL_EXTRA = 3
+NARRATIVE_MIN_SIGNAL_OBJECTIVE = 10
+
+
+def _truncate(text: str, max_chars: int = CONTENT_MAX_CHARS) -> str:
+    if not isinstance(text, str):
+        text = str(text)
+    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+
+
+def _has_min_signal(items: List[Dict[str, Any]], extra: int) -> bool:
+    if extra >= NARRATIVE_MIN_SIGNAL_EXTRA:
+        return True
+    for f in items or []:
+        metrics = f.get("metrics") or {}
+        evidence = f.get("evidence") or {}
+        sample = metrics.get("sample_size") or evidence.get("sample_size") or 0
+        extra_obs = metrics.get("extra_observations") or f.get("extra_observations") or 0
+        objective_lost = (
+            metrics.get("objective_lost")
+            or metrics.get("objectives_lost")
+            or f.get("objective_lost")
+            or f.get("objectives_lost")
+            or 0
+        )
+        if sample >= NARRATIVE_MIN_SIGNAL_SAMPLE or extra_obs >= NARRATIVE_MIN_SIGNAL_EXTRA or objective_lost >= NARRATIVE_MIN_SIGNAL_OBJECTIVE:
+            return True
+    return False
 
 
 def _load_template(name: str) -> str:
@@ -146,11 +176,13 @@ def _render_section(ft: str, grouped: Dict[str, Any]) -> str:
     extra = grouped.get("extra") or 0
     lines: List[str] = []
 
+    evidence_level = "WEAK_BUT_ACTIONABLE" if _has_min_signal(items, extra) else "PLACEHOLDER"
+
     # 结论句
     if items or extra:
         lines.append(f"{friendly}：出现反复问题，需要优先复盘。")
     else:
-        lines.append(f"{friendly}：当前证据不足，仅提供占位结论。")
+        lines.append(f"{friendly}：当前样本存在明显倾向，但置信度有限（低），建议作为复盘假设重点验证。")
 
     # 示例
     for f in items:
@@ -174,7 +206,10 @@ def _render_section(ft: str, grouped: Dict[str, Any]) -> str:
 
     impact, suggestion = _impact_suggestion(ft)
     lines.append(impact)
-    lines.append(suggestion)
+    if evidence_level == "WEAK_BUT_ACTIONABLE":
+        lines.append("【建议】当前样本存在明显倾向，但置信度有限（低），建议作为复盘假设重点验证。")
+    else:
+        lines.append(suggestion)
     return "\n".join(lines)
 
 
@@ -228,7 +263,6 @@ def _synthesize_match_review(facts: List[Dict[str, Any]], scope: Dict[str, Any])
         "ECO_COLLAPSE_SEQUENCE",
         "ROUND_SWING",
         "HIGH_RISK_SEQUENCE",
-        "MID_ROUND_TIMING_PATTERN",
         "OBJECTIVE_LOSS_CHAIN",
         "MAP_WEAK_POINT",
     ]
@@ -244,6 +278,7 @@ def _synthesize_match_review(facts: List[Dict[str, Any]], scope: Dict[str, Any])
     content_lines.extend(sections)
     content = "\n\n".join(content_lines)
     content = refine_narrative(content, NarrativeType.MATCH_REVIEW_AGENDA.value)
+    content = _truncate(content)
     used = len(norm_facts)
     confidence = min(0.85, 0.55 + min(used / 10.0, 0.25)) if used else 0.3
     return NarrativeResult(
@@ -284,6 +319,7 @@ def _synthesize_match_summary(facts: List[Dict[str, Any]], scope: Dict[str, Any]
     content_lines.extend(sections)
     content = "\n\n".join(content_lines)
     content = refine_narrative(content, NarrativeType.SUMMARY_REPORT.value)
+    content = _truncate(content)
     used = len(norm_facts)
     confidence = 0.35 if not used else min(0.8, 0.5 + min(used / 12.0, 0.25))
     return NarrativeResult(

@@ -1,25 +1,43 @@
 import type { AnalysisContext } from "../types/context";
 
 export type ContextHeaderProps = {
-  context: AnalysisContext;
+  context?: AnalysisContext | null;
 };
 
 export function ContextHeader({ context }: ContextHeaderProps) {
-  const { player, team, match, map, timestamp, source, window } = context;
-  const dataSource = source.startsWith("grid") ? (source === "grid-fallback" ? "GRID API · Limited Sample" : "GRID API") : "Mock Demo";
+  if (!context) {
+    return (
+      <header style={styles.wrapper}>
+        <div style={styles.placeholder}>Context unavailable</div>
+      </header>
+    );
+  }
+
+  const safeContext = context ?? {};
+  const player = safeContext.player ?? null;
+  const team = safeContext.team ?? null;
+  const match = safeContext.match ?? null;
+  const map = safeContext.map ?? null;
+  const timestamp = safeContext.timestamp ?? null;
+  const source = safeContext.source ?? "unknown";
+  const window = safeContext.window ?? null;
+
+  const dataSource = String(source).startsWith("grid")
+    ? (source === "grid-fallback" ? "GRID API · Limited Sample" : "GRID API")
+    : "Mock Demo";
   return (
     <header style={styles.wrapper}>
       <div style={styles.row}>
         <span style={styles.label}>Player/Team</span>
-        <span>{player} / {team}</span>
+        <span>{player ?? "-"} / {team ?? "-"}</span>
       </div>
       <div style={styles.row}>
         <span style={styles.label}>Match / Map</span>
-        <span>{match} / {map}</span>
+        <span>{match ?? "-"} / {map ?? "-"}</span>
       </div>
       <div style={styles.row}>
         <span style={styles.label}>Timestamp</span>
-        <span>{timestamp}</span>
+        <span>{timestamp ?? "-"}</span>
       </div>
       <div style={styles.row}>
         <span style={styles.label}>Source</span>
@@ -27,7 +45,7 @@ export function ContextHeader({ context }: ContextHeaderProps) {
       </div>
       <div style={styles.row}>
         <span style={styles.label}>Window</span>
-        <span>{window}</span>
+        <span>{window ?? "-"}</span>
       </div>
     </header>
   );
@@ -52,5 +70,9 @@ const styles: Record<string, React.CSSProperties> = {
   label: {
     color: "#475569",
     fontWeight: 600,
+  },
+  placeholder: {
+    color: "#94a3b8",
+    fontStyle: "italic",
   },
 };

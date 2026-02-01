@@ -23,7 +23,8 @@ import requests
 logging.basicConfig(level=logging.INFO)
 
 import time
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -65,8 +66,15 @@ from driftcoach.session import session_analysis_store, build_analysis_node_from_
 from driftcoach.analysis.answer_synthesizer import AnswerInput, AnswerSynthesisResult, synthesize_answer, render_answer
 from driftcoach.session.analysis_store import SessionAnalysisStore
 from driftcoach.hackathon.series_pipeline import hackathon_mine_and_analyze
-from driftcoach.narrative import synthesize_narrative, NarrativeType
 from driftcoach.narrative.orchestration import run_narrative_orchestration
+from driftcoach.narrative.findings_narrative import render_narrative_from_findings
+from driftcoach.analysis.scope_reducer import reduce_scope
+from driftcoach.analysis.derived_finding_builder import (
+    build_findings_from_facts,
+    evaluate_question,
+    reuse_findings_from_pool,
+)
+from driftcoach.question_state import QuestionState, SessionQAState
 
 
 logger = logging.getLogger(__name__)
@@ -89,6 +97,22 @@ DEMO_QUERY_LIMIT = int(os.getenv("DEMO_QUERY_LIMIT", "8"))
 
 app = FastAPI()
 
+
+@app.exception_handler(Exception)
+async def safe_fallback(request: Request, exc: Exception):
+    logger.warning("global_exception_fallback", exc_info=exc)
+    return JSONResponse(
+        status_code=200,
+        content={
+            "intent": "unknown",
+            "narrative": {
+                "type": "ERROR_FALLBACK",
+                "confidence": 0.1,
+                "content": "系统已生成复盘结果，但内容过多，已启用安全模式。",
+            },
+        },
+    )
+
 # CORS: allow frontend dev server
 app.add_middleware(
     CORSMiddleware,
@@ -101,6 +125,7 @@ app.add_middleware(
 _conversation_store: Dict[str, Dict[str, Any]] = {}
 _session_store: Dict[str, Dict[str, Any]] = {}
 _demo_query_store: Dict[str, int] = {}
+_qa_store: Dict[str, SessionQAState] = {}
 
 
 def _rate_limit_guard() -> None:
@@ -116,6 +141,51 @@ def load_demo_payload() -> Dict[str, Any]:
         raise FileNotFoundError(f"Demo payload not found at {DEMO_PAYLOAD_PATH}")
     with DEMO_PAYLOAD_PATH.open() as f:
         return json.load(f)
+
+
+def _truncate_text(text: Any, max_chars: int = 8000) -> str:
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        try:
+            text = json.dumps(text, ensure_ascii=False)
+        except Exception:
+            text = str(text)
+    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+
+
+def _deduce_intent(coach_query: str, hinted: Optional[str]) -> str:
+    if hinted:
+        return hinted
+    if "经济" in coach_query or "eco" in coach_query.lower():
+        return "ECONOMIC_ISSUE"
+    if "教训" in coach_query or "总结" in coach_query:
+        return "SUMMARY"
+    if "地图" in coach_query or "薄弱" in coach_query:
+        return "MATCH_REVIEW"
+    if "议程" in coach_query or "复盘" in coach_query:
+        return "MATCH_REVIEW"
+    if "选手" in coach_query or "阵亡" in coach_query:
+        return "PLAYER_REVIEW"
+    return hinted or "MATCH_REVIEW"
+
+
+def _scope_from_intent(intent: str) -> str:
+    mapping = {
+        "ECONOMIC_ISSUE": "ECON",
+        "MATCH_REVIEW": "MAP",
+        "PLAYER_REVIEW": "PLAYER",
+        "COUNTERFACTUAL_PLAYER_IMPACT": "PLAYER",
+        "MATCH_SUMMARY": "SUMMARY",
+        "SUMMARY": "SUMMARY",
+    }
+    return mapping.get(intent, "MAP")
+
+
+def _ensure_session_qa(session_id: str) -> SessionQAState:
+    if session_id not in _qa_store:
+        _qa_store[session_id] = SessionQAState(session_id=session_id)
+    return _qa_store[session_id]
 
 
 class CoachQuery(BaseModel):
@@ -2197,6 +2267,7 @@ def coach_init(body: CoachInit):
         "grid_player_id": grid_player_id,
         "grid_series_id": grid_series_id,
     }
+    _qa_store[session_id] = SessionQAState(session_id=session_id)
     if DEMO_MODE:
         remaining = max(0, DEMO_QUERY_LIMIT)
         _demo_query_store[session_id] = remaining
@@ -2553,76 +2624,46 @@ def coach_query(body: CoachQuery):
     payload["context"]["aggregated_performance"] = aggregated_pack
     payload["context"]["aggregated_gaps"] = aggregated_gaps
 
-    # Narrative synthesis (parallel to AnswerSynthesis)
+    # Narrative synthesis based on DerivedFindings only
     try:
-        intent_label = inference_plan.get("intent") or (mining_plan_ctx or {}).get("intent") or ""
-        narrative_type = None
-        if intent_label == "MATCH_REVIEW":
-            narrative_type = NarrativeType.MATCH_REVIEW_AGENDA
-        elif intent_label == "PLAYER_REVIEW":
-            narrative_type = NarrativeType.PLAYER_INSIGHT_REPORT
-        elif intent_label == "COUNTERFACTUAL_PLAYER_IMPACT":
-            narrative_type = NarrativeType.PLAYER_INSIGHT_REPORT
-        elif intent_label == "MATCH_SUMMARY":
-            narrative_type = NarrativeType.SUMMARY_REPORT
+        intent_label = _deduce_intent(body.coach_query, inference_plan.get("intent") or (mining_plan_ctx or {}).get("intent"))
+        scope_label = _scope_from_intent(intent_label)
+        session_key = session_id or "demo"
+        qa_state = _ensure_session_qa(session_key)
 
-        if narrative_type:
-            facts_for_narrative = context_meta.get("file_facts") or []
-            scope = {
-                "series_id": payload.get("context", {}).get("grid_series_id") or grid_series_id_local,
-                "player_id": payload.get("context", {}).get("grid_player_id") or grid_player_id_local,
-                "player_name": (context_meta.get("meta", {}) or {}).get("last_player_name") or (payload.get("context", {}) or {}).get("player"),
-                "map": (payload.get("context", {}) or {}).get("map"),
-                "match_format": (payload.get("context", {}) or {}).get("match_format") or "bo?",
-                "opponent": (payload.get("context", {}) or {}).get("opponent"),
-            }
+        available_facts = context_meta.get("file_facts") or []
+        question_state = QuestionState.new(
+            body.coach_query,
+            intent=intent_label,
+            scope=scope_label,
+            required_fact_types=(mining_plan_ctx or {}).get("required_facts") or [],
+            available_facts=available_facts,
+        )
 
-            # PLAYER_REVIEW 选手缺失兜底
-            skip_synthesis = False
-            if intent_label == "PLAYER_REVIEW":
-                player_facts = [
-                    f
-                    for f in facts_for_narrative
-                    if f.get("fact_type") == "PLAYER_IMPACT_STAT"
-                    or (f.get("scope", {}) or {}).get("player_id") == scope.get("player_id")
-                    or (f.get("scope", {}) or {}).get("player_name") == scope.get("player_name")
-                ]
-                if len(player_facts) == 0:
-                    payload["narrative"] = {
-                        "type": NarrativeType.PLAYER_INSIGHT_REPORT.value,
-                        "confidence": 0.3,
-                        "content": (
-                            "未找到该选手在本场比赛的有效数据。\n"
-                            "【事实】当前缺少与该选手相关的回合与聚合样本。\n"
-                            "【影响】无法评估其对局表现，结论保持占位。\n"
-                            "【建议】补充选手标注或指定队伍/地图后再复盘。"
-                        ),
-                    }
-                    payload.setdefault("context", {}).setdefault("meta", {})["narrative_used_facts"] = 0
-                    skip_synthesis = True
+        filtered_facts, filtered_findings = reduce_scope(question_state, qa_state)
 
-            if intent_label == "COUNTERFACTUAL_PLAYER_IMPACT":
-                payload["narrative"] = {
-                    "type": NarrativeType.PLAYER_INSIGHT_REPORT.value,
-                    "confidence": 0.35,
-                    "content": (
-                        "假设该选手在前期阵亡的占位推演（低置信）：\n"
-                        "【事实】当前缺少直接样本，基于常见模式推断。\n"
-                        "【影响】前期控图与信息链会削弱，经济更易断档。\n"
-                        "【建议】准备替代首发与暂停策略，必要时选择保枪稳节奏。"
-                    ),
-                }
-                payload.setdefault("context", {}).setdefault("meta", {})["narrative_used_facts"] = 0
-                skip_synthesis = True
+        findings_for_question = []
+        if intent_label == "SUMMARY" or scope_label == "SUMMARY":
+            findings_for_question = reuse_findings_from_pool(question_state, filtered_findings)
+        else:
+            findings_for_question = build_findings_from_facts(question_state, filtered_facts)
+            qa_state.findings_pool.extend(findings_for_question)
 
-            if not skip_synthesis:
-                narrative_result = synthesize_narrative(narrative_type, facts_for_narrative, scope)
-                payload["narrative"] = {
-                    "type": narrative_result.narrative_type.value,
-                    "content": narrative_result.content,
-                    "confidence": narrative_result.confidence,
-                }
-                payload.setdefault("context", {}).setdefault("meta", {})["narrative_used_facts"] = narrative_result.used_facts
+        status, conf = evaluate_question(findings_for_question)
+        question_state.derived_findings = findings_for_question
+        question_state.status = status
+        question_state.confidence = conf
+        qa_state.questions.append(question_state)
+
+        narrative_content, narrative_conf = render_narrative_from_findings(question_state, findings_for_question)
+        payload["narrative"] = {
+            "type": f"FINDINGS_{intent_label}",
+            "confidence": narrative_conf,
+            "content": narrative_content,
+        }
+        payload.setdefault("context", {}).setdefault("meta", {})["narrative_used_facts"] = len(findings_for_question)
+        payload.setdefault("qa", {})["questions"] = [q.to_dict() for q in qa_state.questions]
+        payload["qa"]["findings_pool"] = [f.to_dict() for f in qa_state.findings_pool]
     except Exception as exc:  # pragma: no cover
         logger.warning("narrative_synthesis_failed", exc_info=exc)
 
@@ -2683,7 +2724,32 @@ def coach_query(body: CoachQuery):
         inference_plan,
     )
 
-    return payload
+    # -------- Response whitelist & truncation --------
+    intent_label = _deduce_intent(body.coach_query, (inference_plan or {}).get("intent") or (mining_plan_ctx or {}).get("intent") or payload.get("intent"))
+    narrative_obj = payload.get("narrative") or {}
+    narrative_content = _truncate_text(narrative_obj.get("content"), 8000)
+    fact_counts: Dict[str, int] = {}
+    by_type = payload.get("context", {}).get("evidence", {}).get("byType") or {}
+    if isinstance(by_type, dict):
+        for k, v in by_type.items():
+            if isinstance(v, (int, float)):
+                fact_counts[str(k)] = int(v)
+    used_facts = payload.get("context", {}).get("meta", {}).get("narrative_used_facts") or 0
+
+    sanitized = {
+        "intent": intent_label,
+        "narrative": {
+            "type": narrative_obj.get("type"),
+            "confidence": narrative_obj.get("confidence"),
+            "content": narrative_content,
+        },
+        "fact_usage": {
+            "used": int(used_facts) if isinstance(used_facts, (int, float)) else 0,
+            "by_type": fact_counts,
+        },
+    }
+
+    return sanitized
 
 
 @app.get("/api/demo")

@@ -147,21 +147,24 @@ export function App() {
       });
 
       if (!resp.ok) {
-        if (resp.status === 429) {
-          setError("数据接口限流，请稍后重试");
-        } else {
-          setError("后端不可达");
-        }
+        showToast("后端返回异常，已启用安全模式");
         return;
       }
 
-      const contentType = resp.headers.get("content-type") || "";
-      if (!contentType.includes("application/json")) {
-        setError("后端返回非 JSON 响应");
+      const text = await resp.text();
+      if (text.length > 200_000) {
+        setPayload({
+          narrative: {
+            type: "TRUNCATED",
+            content: text.slice(0, 8000),
+            confidence: 0.1,
+          },
+        } as any);
+        setPhase("QUERY_SENT");
         return;
       }
 
-      const json = (await resp.json()) as CoachPayload & { gate?: string; reasons?: string[]; answer_synthesis?: { claim?: string } };
+      const json = JSON.parse(text) as CoachPayload & { gate?: string; reasons?: string[]; answer_synthesis?: { claim?: string } };
 
       // Gate handling: evidence insufficient / llm disabled
       if ((json as any).gate === "EVIDENCE_INSUFFICIENT") {
