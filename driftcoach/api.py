@@ -65,6 +65,8 @@ from driftcoach.session import session_analysis_store, build_analysis_node_from_
 from driftcoach.analysis.answer_synthesizer import AnswerInput, AnswerSynthesisResult, synthesize_answer, render_answer
 from driftcoach.session.analysis_store import SessionAnalysisStore
 from driftcoach.hackathon.series_pipeline import hackathon_mine_and_analyze
+from driftcoach.narrative import synthesize_narrative, NarrativeType
+from driftcoach.narrative.orchestration import run_narrative_orchestration
 
 
 logger = logging.getLogger(__name__)
@@ -81,13 +83,16 @@ GRID_TEAM_NAME = os.getenv("GRID_TEAM_NAME", "UnknownTeam")
 MAX_PATCHES_PER_QUERY = int(os.getenv("MAX_PATCHES_PER_QUERY", "3"))
 HACKATHON_MODE = (os.getenv("HACKATHON_MODE", "true").lower() == "true")
 STATS_ENABLED = (os.getenv("STATS_ENABLED", "false").lower() == "true")
+DEMO_MODE = (os.getenv("DEMO_MODE", "false").lower() == "true")
+DEMO_SERIES_ID = os.getenv("DEMO_SERIES_ID", GRID_SERIES_ID)
+DEMO_QUERY_LIMIT = int(os.getenv("DEMO_QUERY_LIMIT", "8"))
 
 app = FastAPI()
 
 # CORS: allow frontend dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -95,6 +100,7 @@ app.add_middleware(
 
 _conversation_store: Dict[str, Dict[str, Any]] = {}
 _session_store: Dict[str, Dict[str, Any]] = {}
+_demo_query_store: Dict[str, int] = {}
 
 
 def _rate_limit_guard() -> None:
@@ -2157,11 +2163,19 @@ def coach_init(body: CoachInit):
     if DATA_SOURCE != "grid":
         raise HTTPException(status_code=400, detail="Context init only required in grid mode")
 
-    if not body.grid_series_id:
+    grid_series_id = body.grid_series_id
+    grid_player_id = body.grid_player_id or GRID_PLAYER_ID
+
+    if DEMO_MODE:
+        grid_series_id = DEMO_SERIES_ID
+        if not grid_series_id:
+            raise HTTPException(status_code=400, detail="demo_series_id_missing")
+
+    if not grid_series_id:
         raise HTTPException(status_code=400, detail="series_id_required")
 
     try:
-        states, context_meta = load_states_from_grid(body.grid_player_id, body.grid_series_id)
+        states, context_meta = load_states_from_grid(grid_player_id, grid_series_id)
     except GridRateExceeded as exc:  # pragma: no cover
         logger.warning("coach_init_rate_limited", exc_info=exc)
         raise HTTPException(status_code=429, detail="GRID rate limit exhausted, please retry shortly")
@@ -2180,9 +2194,13 @@ def coach_init(body: CoachInit):
     _session_store[session_id] = {
         "states": states,
         "context_meta": context_meta,
-        "grid_player_id": body.grid_player_id,
-        "grid_series_id": body.grid_series_id,
+        "grid_player_id": grid_player_id,
+        "grid_series_id": grid_series_id,
     }
+    if DEMO_MODE:
+        remaining = max(0, DEMO_QUERY_LIMIT)
+        _demo_query_store[session_id] = remaining
+        _session_store[session_id]["demo_remaining_queries"] = remaining
 
     session_analysis_store.init_session(session_id)
     session_analysis_store.merge_entities(session_id, _harvest_entities_from_states(states))
@@ -2190,15 +2208,19 @@ def coach_init(body: CoachInit):
     context = {
         "player": context_meta.get("player") or GRID_PLAYER_NAME,
         "team": context_meta.get("team") or GRID_TEAM_NAME,
-        "match": body.grid_series_id,
+        "match": grid_series_id,
         "map": states[0].map if states else "unknown",
         "timestamp": context_meta.get("timestamp") or "n/a",
-        "source": "grid",
+        "source": "grid-demo" if DEMO_MODE else "grid",
         "window": context_meta.get("window") or "unknown",
-        "grid_player_id": body.grid_player_id,
-        "grid_series_id": body.grid_series_id,
+        "grid_player_id": grid_player_id,
+        "grid_series_id": grid_series_id,
         "states_loaded": bool(states),
     }
+    if DEMO_MODE:
+        context.setdefault("meta", {})
+        context["meta"]["demo_mode"] = True
+        context["meta"]["demo_remaining_queries"] = _demo_query_store.get(session_id, 0)
     logger.info("[INIT] context loaded, llm=DISABLED")
     return {"status": "READY", "context_loaded": True, "session_id": session_id, "context": context}
 
@@ -2224,6 +2246,12 @@ def coach_query(body: CoachQuery):
         if not session_id or session_id not in _session_store:
             raise HTTPException(status_code=400, detail="Context not initialized. Call /coach/init first.")
         session = _session_store[session_id]
+        if DEMO_MODE:
+            remaining = _demo_query_store.get(session_id, DEMO_QUERY_LIMIT)
+            if remaining <= 0:
+                raise HTTPException(status_code=429, detail="demo_query_limit_exceeded")
+            _demo_query_store[session_id] = remaining - 1
+            session["demo_remaining_queries"] = remaining - 1
         states = list(session.get("states", []))
         context_meta = dict(session.get("context_meta", {}))
         if not states:
@@ -2311,6 +2339,7 @@ def coach_query(body: CoachQuery):
             if not ft:
                 continue
             facts_by_type.setdefault(ft, []).append(f)
+        context_meta["file_facts"] = file_facts
 
         unresolved_player = resolution.get("status") != "resolved" and player_name
         if unresolved_player:
@@ -2337,6 +2366,26 @@ def coach_query(body: CoachQuery):
             )
             ans_result = synthesize_answer(ans_input)
         context_meta["answer_synthesis"] = asdict(ans_result)
+
+        # Narrative orchestration: auto-run composite intents to harvest facts
+        narrative_intent = (mining_plan or {}).get("intent") if isinstance(mining_plan, dict) else None
+        if narrative_intent in {"MATCH_REVIEW", "PLAYER_REVIEW"}:
+            extra_evidence, extra_nodes = run_narrative_orchestration(
+                narrative_intent,
+                GRID_API_KEY,
+                grid_series_id_local,
+                body.coach_query,
+                player_id=player_focus,
+                player_name=player_name,
+            )
+            if extra_evidence:
+                file_facts_extra = [e for e in extra_evidence if e.get("type") == "FILE_FACT"]
+                context_meta.setdefault("hackathon_evidence", []).extend(extra_evidence)
+                evidence.extend(extra_evidence)
+                context_meta.setdefault("file_facts", []).extend(file_facts_extra)
+            if extra_nodes and session_id:
+                session_analysis_store.upsert_nodes(session_id, extra_nodes, body.coach_query)
+                session_analysis_store.merge_entities(session_id, _harvest_entities_from_states(states))
 
     if mode == "ai":
         try:
@@ -2404,6 +2453,12 @@ def coach_query(body: CoachQuery):
         },
         "recent_evidence": states[-5:],
     }
+
+    # Narrative intents bypass hard gate to allow composite orchestration
+    if inference_input["intent"] in {"MATCH_REVIEW", "PLAYER_REVIEW"}:
+        ctx = inference_input.setdefault("context", {}).setdefault("evidence", {})
+        ctx["states_count"] = max(ctx.get("states_count") or 0, 20)
+        ctx["seriesPool"] = ctx.get("seriesPool") or 1
 
     inference_plan = generate_inference_plan(inference_input)
     logger.info("[GATE] decision=%s reasons=%s", inference_plan.get("judgment"), inference_plan.get("rationale"))
@@ -2498,6 +2553,85 @@ def coach_query(body: CoachQuery):
     payload["context"]["aggregated_performance"] = aggregated_pack
     payload["context"]["aggregated_gaps"] = aggregated_gaps
 
+    # Narrative synthesis (parallel to AnswerSynthesis)
+    try:
+        intent_label = inference_plan.get("intent") or (mining_plan_ctx or {}).get("intent") or ""
+        narrative_type = None
+        if intent_label == "MATCH_REVIEW":
+            narrative_type = NarrativeType.MATCH_REVIEW_AGENDA
+        elif intent_label == "PLAYER_REVIEW":
+            narrative_type = NarrativeType.PLAYER_INSIGHT_REPORT
+        elif intent_label == "COUNTERFACTUAL_PLAYER_IMPACT":
+            narrative_type = NarrativeType.PLAYER_INSIGHT_REPORT
+        elif intent_label == "MATCH_SUMMARY":
+            narrative_type = NarrativeType.SUMMARY_REPORT
+
+        if narrative_type:
+            facts_for_narrative = context_meta.get("file_facts") or []
+            scope = {
+                "series_id": payload.get("context", {}).get("grid_series_id") or grid_series_id_local,
+                "player_id": payload.get("context", {}).get("grid_player_id") or grid_player_id_local,
+                "player_name": (context_meta.get("meta", {}) or {}).get("last_player_name") or (payload.get("context", {}) or {}).get("player"),
+                "map": (payload.get("context", {}) or {}).get("map"),
+                "match_format": (payload.get("context", {}) or {}).get("match_format") or "bo?",
+                "opponent": (payload.get("context", {}) or {}).get("opponent"),
+            }
+
+            # PLAYER_REVIEW 选手缺失兜底
+            skip_synthesis = False
+            if intent_label == "PLAYER_REVIEW":
+                player_facts = [
+                    f
+                    for f in facts_for_narrative
+                    if f.get("fact_type") == "PLAYER_IMPACT_STAT"
+                    or (f.get("scope", {}) or {}).get("player_id") == scope.get("player_id")
+                    or (f.get("scope", {}) or {}).get("player_name") == scope.get("player_name")
+                ]
+                if len(player_facts) == 0:
+                    payload["narrative"] = {
+                        "type": NarrativeType.PLAYER_INSIGHT_REPORT.value,
+                        "confidence": 0.3,
+                        "content": (
+                            "未找到该选手在本场比赛的有效数据。\n"
+                            "【事实】当前缺少与该选手相关的回合与聚合样本。\n"
+                            "【影响】无法评估其对局表现，结论保持占位。\n"
+                            "【建议】补充选手标注或指定队伍/地图后再复盘。"
+                        ),
+                    }
+                    payload.setdefault("context", {}).setdefault("meta", {})["narrative_used_facts"] = 0
+                    skip_synthesis = True
+
+            if intent_label == "COUNTERFACTUAL_PLAYER_IMPACT":
+                payload["narrative"] = {
+                    "type": NarrativeType.PLAYER_INSIGHT_REPORT.value,
+                    "confidence": 0.35,
+                    "content": (
+                        "假设该选手在前期阵亡的占位推演（低置信）：\n"
+                        "【事实】当前缺少直接样本，基于常见模式推断。\n"
+                        "【影响】前期控图与信息链会削弱，经济更易断档。\n"
+                        "【建议】准备替代首发与暂停策略，必要时选择保枪稳节奏。"
+                    ),
+                }
+                payload.setdefault("context", {}).setdefault("meta", {})["narrative_used_facts"] = 0
+                skip_synthesis = True
+
+            if not skip_synthesis:
+                narrative_result = synthesize_narrative(narrative_type, facts_for_narrative, scope)
+                payload["narrative"] = {
+                    "type": narrative_result.narrative_type.value,
+                    "content": narrative_result.content,
+                    "confidence": narrative_result.confidence,
+                }
+                payload.setdefault("context", {}).setdefault("meta", {})["narrative_used_facts"] = narrative_result.used_facts
+    except Exception as exc:  # pragma: no cover
+        logger.warning("narrative_synthesis_failed", exc_info=exc)
+
+    if DEMO_MODE and session_id:
+        meta = payload.setdefault("context", {}).setdefault("meta", {})
+        meta["demo_mode"] = True
+        meta["demo_series_id"] = grid_series_id_local
+        meta["demo_remaining_queries"] = _demo_query_store.get(session_id, 0)
+
     if context_meta.get("answer_synthesis"):
         payload["answer_synthesis"] = context_meta.get("answer_synthesis")
         payload.setdefault("context", {}).setdefault("meta", {})["answer_synthesis"] = context_meta.get("answer_synthesis")
@@ -2572,6 +2706,16 @@ def get_demo() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc))
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=500, detail="Failed to load demo payload") from exc
+
+
+@app.get("/api/health")
+def health() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "data_source": DATA_SOURCE,
+        "demo_mode": DEMO_MODE,
+        "demo_series_id": DEMO_SERIES_ID,
+    }
 
 
 if __name__ == "__main__":

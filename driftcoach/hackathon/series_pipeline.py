@@ -345,6 +345,7 @@ def hackathon_mine_and_analyze(
     player_focus: Optional[str] = None,
     player_name: Optional[str] = None,
     mining_plan: Optional[Dict[str, Any]] = None,
+    should_force_fd: bool = False,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     if not series_id:
         raise ValueError("series_id is required for mining")
@@ -354,7 +355,7 @@ def hackathon_mine_and_analyze(
     # Step 1: load events (must precede player resolution)
     intent_label = mining_plan.get("intent") if isinstance(mining_plan, dict) else None
     req_facts = (mining_plan.get("required_facts") or []) if isinstance(mining_plan, dict) else []
-    should_force_fd = any(str(f).endswith("_ROUND") or str(f).endswith("_SEQUENCE") for f in req_facts)
+    should_force_fd = should_force_fd or any(str(f).endswith("_ROUND") or str(f).endswith("_SEQUENCE") for f in req_facts)
     logger.info(
         "[FILE_DOWNLOAD] triggered_by=NL_INTENT intent=%s required_facts=%s should_force_fd=%s",
         intent_label,

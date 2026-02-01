@@ -116,16 +116,21 @@ def _extract_events_from_file(path: pathlib.Path) -> Tuple[List[RawEvent], Dict[
             events.append(_normalize_event(obj))
 
     if zipfile.is_zipfile(path):
-        with zipfile.ZipFile(path, "r") as zf:
-            for name in zf.namelist():
-                try:
-                    with zf.open(name) as f:
-                        data = f.read()
-                        obj = _read_json_bytes(data)
-                        if obj is not None:
-                            _append(obj)
-                except Exception:
-                    continue
+        try:
+            with zipfile.ZipFile(path, "r") as zf:
+                for name in zf.namelist():
+                    try:
+                        with zf.open(name) as f:
+                            data = f.read()
+                            obj = _read_json_bytes(data)
+                            if obj is not None:
+                                _append(obj)
+                    except Exception:
+                        continue
+        except zipfile.BadZipFile:
+            obj = _read_json_bytes(path.read_bytes())
+            if obj is not None:
+                _append(obj)
     elif path.suffix == ".gz":
         with gzip.open(path, "rb") as f:
             obj = _read_json_bytes(f.read())

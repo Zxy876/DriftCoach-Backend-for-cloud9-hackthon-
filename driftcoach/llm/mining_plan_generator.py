@@ -12,6 +12,10 @@ ALLOWED_FACTS = {
     "HIGH_RISK_SEQUENCE",
     "ECO_COLLAPSE_SEQUENCE",
     "OBJECTIVE_LOSS_CHAIN",
+    "ECONOMIC_PATTERN",
+    "MID_ROUND_TIMING_PATTERN",
+    "PLAYER_IMPACT_STAT",
+    "CONTEXT_ONLY",
 }
 
 
@@ -48,6 +52,10 @@ def _intent_and_facts_from_query(coach_query: str, last_player_name: Optional[st
     temporal_range = "entire_series"
     player_name = _extract_player_name(q_raw, fallback_name=last_player_name)
 
+    # 地图类优先（不得路由到 PLAYER_REVIEW）
+    map_keywords = ["地图", "控制", "站位", "区域", "点位", "map"]
+    is_map_question = has_any(map_keywords)
+
     # A1. 问题类型映射表（硬规则）
     if has_any(["高风险", "risk", "高危", "险局"]):
         intent = "RISK_ASSESSMENT"
@@ -78,6 +86,25 @@ def _intent_and_facts_from_query(coach_query: str, last_player_name: Optional[st
         intent = "COLLAPSE_ONSET_ANALYSIS"
         question_type = "DIAGNOSIS"
         required_facts = ["ECO_COLLAPSE_SEQUENCE", "ROUND_SWING"]
+    elif has_any(["复盘", "review", "议程", "回顾"]):
+        intent = "MATCH_REVIEW"
+        question_type = "SUMMARY"
+        required_facts = [
+            "ROUND_SWING",
+            "ECONOMIC_PATTERN",
+            "MID_ROUND_TIMING_PATTERN",
+            "OBJECTIVE_LOSS_CHAIN",
+        ]
+    elif has_any(["经济", "强起", "force", "eco", "滚雪球", "经济管理", "经济问题"]):
+        # 强制路由到比赛复盘（经济聚焦），避免落入 AnswerSynthesis
+        intent = "MATCH_REVIEW"
+        question_type = "SUMMARY"
+        required_facts = [
+            "ECONOMIC_PATTERN",
+            "FORCE_BUY_ROUND",
+            "ECO_COLLAPSE_SEQUENCE",
+            "ROUND_SWING",
+        ]
     elif has_any(["上半", "下半", "阶段", "phase", "节奏"]):
         intent = "PHASE_COMPARISON"
         question_type = "COMPARISON"
@@ -90,7 +117,7 @@ def _intent_and_facts_from_query(coach_query: str, last_player_name: Optional[st
         intent = "EXECUTION_VS_STRATEGY"
         question_type = "EVALUATION"
         required_facts = ["OBJECTIVE_LOSS_CHAIN", "ROUND_SWING"]
-    elif has_any(["弱点", "薄弱", "突破口", "map", "点位", "防守漏洞"]):
+    elif is_map_question:
         intent = "MAP_WEAK_POINT"
         question_type = "DETECTION"
         required_facts = ["HIGH_RISK_SEQUENCE", "OBJECTIVE_LOSS_CHAIN"]
@@ -99,14 +126,31 @@ def _intent_and_facts_from_query(coach_query: str, last_player_name: Optional[st
         question_type = "ANALYSIS"
         required_facts = ["ROUND_SWING", "FORCE_BUY_ROUND"]
 
+    # B2: 选手阵亡假设
+    if has_any(["如果", "假设"]) and has_any(["阵亡", "击杀", "被杀", "死亡"]):
+        intent = "COUNTERFACTUAL_PLAYER_IMPACT"
+        question_type = "WHAT_IF"
+        required_facts = ["CONTEXT_ONLY"]
+
+    # C2: 关键教训/总结
+    if has_any(["总结", "教训", "复盘教训", "关键教训", "lesson", "learnings"]):
+        intent = "MATCH_SUMMARY"
+        question_type = "SUMMARY"
+        required_facts = ["CONTEXT_ONLY"]
+
     # 玩家相关意图：如果提到 player 名或包含“选手/他/她”等语义，则标记
     if player_name or has_any(["选手", "他", "她", "个人表现", "个人"]):
         if "player" not in entities:
             entities.append("player")
 
+    if (player_name or has_any(["球员", "选手", "个人表现", "洞察", "报告"])) and has_any(["问题", "表现", "分析", "洞察", "report", "insight"]) and not is_map_question:
+        intent = "PLAYER_REVIEW"
+        question_type = "SUMMARY"
+        required_facts = ["PLAYER_IMPACT_STAT", "ROUND_SWING", "HIGH_RISK_SEQUENCE"]
+
     # 过滤到白名单并兜底
     required_facts = [f for f in required_facts if f in ALLOWED_FACTS]
-    if not required_facts:
+    if not required_facts and intent not in {"COUNTERFACTUAL_PLAYER_IMPACT", "MATCH_SUMMARY"}:
         required_facts = ["OBJECTIVE_LOSS_CHAIN"]
         intent = intent or "UNKNOWN"
         question_type = question_type or "OPEN"

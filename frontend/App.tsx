@@ -6,12 +6,40 @@ import { ReviewPanel } from "./components/ReviewPanel";
 import { WhatIfPanel } from "./components/WhatIfPanel";
 import { CoachChatPanel } from "./components/CoachChatPanel";
 import { SessionAnalysisPanel } from "./components/SessionAnalysisPanel";
+import { NarrativePanel } from "./components/NarrativePanel";
 import type { CoachPayload, DemoPayload } from "./types/context";
 import demo from "./mocks/demo.json";
 import { renderInsight, renderReview, renderWhatIf } from "./llm/render";
 import { config } from "./config";
 
 type AnalysisPhase = "INIT_ONLY" | "QUERY_SENT" | "ANALYSIS_UPDATED" | "IDLE";
+
+function extractNarrativeText(payload: any): string | null {
+  const narrative = payload?.narrative;
+  if (!narrative) return null;
+  const content = narrative?.content ?? narrative;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return JSON.stringify(content, null, 2);
+  if (typeof content === "object") {
+    if (typeof (content as any).markdown === "string") return (content as any).markdown;
+    if (Array.isArray((content as any).sections)) {
+      const sections = (content as any).sections
+        .filter(Boolean)
+        .map((s: any, idx: number) => `${s?.title || `Section ${idx + 1}`}` + (s?.body ? `\n${s.body}` : ""));
+      if (sections.length > 0) return sections.join("\n\n");
+    }
+    return JSON.stringify(content, null, 2);
+  }
+  return String(content);
+}
+
+function cacheFallbackText(payload: CoachPayload | null) {
+  if (typeof window === "undefined" || !payload) return;
+  const narrativeText = extractNarrativeText(payload);
+  if (narrativeText) (window as any).__DC_LAST_NARRATIVE__ = narrativeText;
+  const answerText = (payload as any).assistant_message || (payload as any).answer_synthesis?.claim;
+  if (answerText) (window as any).__DC_LAST_ANSWER__ = answerText;
+}
 
 export function App() {
   const [payload, setPayload] = useState<CoachPayload | null>(null);
@@ -32,28 +60,40 @@ export function App() {
   }, []);
 
   async function enrichPayload(source: CoachPayload): Promise<CoachPayload> {
-    const enrichedInsights = await Promise.all(
-      (source.insights || []).map(async (i) => {
-        const rendered = await renderInsight(i, { mode: renderMode, gameId: config.defaultGameId });
-        return { ...i, explanation: rendered.text, explanationTrace: rendered.trace };
-      })
-    );
+    const enrichedInsights = Array.isArray(source.insights)
+      ? await Promise.all(
+          (source.insights || []).map(async (i) => {
+            const rendered = await renderInsight(i, { mode: renderMode, gameId: config.defaultGameId });
+            return { ...i, explanation: rendered.text, explanationTrace: rendered.trace };
+          })
+        )
+      : [];
 
-    const enrichedReview = await Promise.all(
-      (source.review || []).map(async (r) => {
-        const rendered = await renderReview(r, { mode: renderMode, gameId: config.defaultGameId });
-        return { ...r, explanation: rendered.text, explanationTrace: rendered.trace };
-      })
-    );
+    const enrichedReview = Array.isArray(source.review)
+      ? await Promise.all(
+          (source.review || []).map(async (r) => {
+            const rendered = await renderReview(r, { mode: renderMode, gameId: config.defaultGameId });
+            return { ...r, explanation: rendered.text, explanationTrace: rendered.trace };
+          })
+        )
+      : [];
 
-    const renderedWhatIf = await renderWhatIf(source.whatIf, { mode: renderMode, gameId: config.defaultGameId });
+    let renderedWhatIf: Awaited<ReturnType<typeof renderWhatIf>> | null = null;
+    if (source.whatIf) {
+      renderedWhatIf = await renderWhatIf(source.whatIf as any, { mode: renderMode, gameId: config.defaultGameId });
+    }
 
-    return {
-      ...source,
+    const enriched: CoachPayload = {
+      ...(source as CoachPayload),
       insights: enrichedInsights,
       review: enrichedReview,
-      whatIf: { ...source.whatIf, explanation: renderedWhatIf.text, explanationTrace: renderedWhatIf.trace },
+      whatIf: source.whatIf
+        ? { ...(source as any).whatIf, explanation: renderedWhatIf?.text, explanationTrace: renderedWhatIf?.trace }
+        : undefined,
     };
+
+    cacheFallbackText(enriched);
+    return enriched;
   }
 
   useEffect(() => {
@@ -74,6 +114,7 @@ export function App() {
 
       const enriched = await enrichPayload(source);
       setPayload(enriched);
+      cacheFallbackText(enriched);
       setPhase("INIT_ONLY");
     }
 
@@ -131,13 +172,17 @@ export function App() {
 
       // AnswerSynthesis 优先展示；若不存在则判定为 INSUFFICIENT
       if (!(json as any).answer_synthesis) {
-        setPayload({ ...(json as any), assistant_message: "当前问题证据不足（INSUFFICIENT）" });
+        const insufficientPayload = { ...(json as any), assistant_message: "当前问题证据不足（INSUFFICIENT）" } as CoachPayload;
+        setPayload(insufficientPayload);
+        cacheFallbackText(insufficientPayload);
         setPhase("QUERY_SENT");
         return;
       }
 
       const enriched = await enrichPayload(json);
       setPayload(enriched);
+      cacheFallbackText(enriched);
+      cacheFallbackText(enriched);
 
       const delta =
         (json.context?.evidence?.delta_by_type && Object.keys(json.context.evidence.delta_by_type).length > 0) ||
@@ -200,10 +245,20 @@ export function App() {
   const deltaByType = payload.context?.evidence?.delta_by_type || {};
   const deltaStates = payload.context?.evidence?.delta_states || 0;
   const recentlyAdded = payload.session_analysis?.recently_added_node_ids || [];
+  const isDemoMode = config.demoMode || Boolean((payload as any).context?.meta?.demo_mode);
+  const demoRemaining = (payload as any).context?.meta?.demo_remaining_queries;
+  const narrative = (payload as any).narrative;
 
   return (
     <div style={styles.page}>
       <h2 style={styles.heading}>DriftCoach Frontend Demo</h2>
+      {isDemoMode ? (
+        <div style={styles.badgeRow}>
+          <span style={styles.demoBadge}>Demo Mode</span>
+          {typeof demoRemaining === "number" ? <span style={styles.demoNote}>Remaining queries: {demoRemaining}</span> : null}
+          <span style={styles.demoNote}>API: {config.apiBase}</span>
+        </div>
+      ) : null}
       <p style={styles.subtitle}>Demo flow (frozen order): 1) Player Insight → 2) Post-match Review → 3) What-if Analysis</p>
       {error ? <div style={styles.error}>{error}</div> : null}
       <ContextSetup onLoad={handleInit} loading={initLoading} contextLoaded={contextLoaded} />
@@ -229,6 +284,7 @@ export function App() {
         <ReviewPanel review={payload.review} />
         <WhatIfPanel whatIf={payload.whatIf} />
       </div>
+      <NarrativePanel narrative={narrative} />
       <CoachChatPanel
         loading={loading}
         assistantMessage={payload.assistant_message || (payload as any).answer_synthesis?.claim}
@@ -254,13 +310,6 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "24px",
     background: "#f5f7fb",
     color: "#0f172a",
-  deltaBox: {
-    marginBottom: "12px",
-    padding: "12px",
-    border: "1px solid #e5e7eb",
-    borderRadius: "8px",
-    background: "#f8fafc",
-  },
   },
   heading: {
     marginTop: 0,
@@ -272,11 +321,39 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#475569",
     fontSize: "14px",
   },
+  badgeRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
+    marginBottom: "8px",
+  },
+  demoBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    padding: "4px 10px",
+    background: "#0f172a",
+    color: "#fff",
+    borderRadius: "999px",
+    fontSize: "12px",
+    fontWeight: 700,
+    letterSpacing: "0.2px",
+  },
+  demoNote: {
+    fontSize: "12px",
+    color: "#475569",
+  },
   panels: {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
     gap: "16px",
     marginTop: "16px",
+  },
+  deltaBox: {
+    marginBottom: "12px",
+    padding: "12px",
+    border: "1px solid #e5e7eb",
+    borderRadius: "8px",
+    background: "#f8fafc",
   },
   assumptions: {
     marginTop: "24px",

@@ -91,16 +91,28 @@ def _default_patches(anchor_context: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def generate_inference_plan(inference_input: Dict[str, Any]) -> Dict[str, Any]:
     ctx = inference_input.get("context", {})
+    intent = inference_input.get("intent")
+
+    if intent in {"COUNTERFACTUAL_PLAYER_IMPACT", "MATCH_SUMMARY"}:
+        return {
+            "intent": intent,
+            "judgment": "EVIDENCE_SUFFICIENT",
+            "rationale": "intent-bypass",
+            "missing_evidence": [],
+            "proposed_patches": [],
+            "confidence_note": "intent-bypass",
+        }
     gate_decision, reasons = evidence_gate(
         ctx,
         inference_input.get("recent_evidence", []),
-        intent=inference_input.get("intent"),
+        intent=intent,
         required_facts=inference_input.get("required_facts"),
     )
 
     if gate_decision == "INSUFFICIENT":
         rationale = _clip("; ".join(reasons))
         return {
+            "intent": intent,
             "judgment": "EVIDENCE_INSUFFICIENT",
             "rationale": rationale,
             "missing_evidence": [],
@@ -111,6 +123,7 @@ def generate_inference_plan(inference_input: Dict[str, Any]) -> Dict[str, Any]:
     # SUFFICIENT (deterministic)
     rationale = _clip("; ".join(reasons) or "evidence meets gate thresholds")
     return {
+        "intent": intent,
         "judgment": "EVIDENCE_SUFFICIENT",
         "rationale": rationale,
         "missing_evidence": [],

@@ -1,7 +1,22 @@
 import type { WhatIfOutcome, Action } from "../types/whatif";
 import { formatConfidence } from "./shared";
 
-export function WhatIfPanel({ whatIf }: { whatIf: WhatIfOutcome }) {
+function EmptyState() {
+  return <div style={styles.empty}>暂无 What-if 数据</div>;
+}
+
+export function WhatIfPanel({ whatIf }: { whatIf?: WhatIfOutcome | null }) {
+  if (!whatIf) {
+    return (
+      <div style={styles.panel}>
+        <h3 style={styles.title}>What-if Analysis</h3>
+        <EmptyState />
+      </div>
+    );
+  }
+
+  const actions = Array.isArray(whatIf.actions) ? whatIf.actions : [];
+  const outcomes = (whatIf as any).outcomes || {};
   return (
     <div style={styles.panel}>
       <h3 style={styles.title}>What-if Analysis</h3>
@@ -11,8 +26,8 @@ export function WhatIfPanel({ whatIf }: { whatIf: WhatIfOutcome }) {
           <span>Action</span>
           <span>Win Prob / n</span>
         </div>
-        {whatIf.actions.map((action: Action) => {
-          const payload = whatIf.outcomes[action];
+        {actions.map((action: Action) => {
+          const payload = outcomes[action];
           const insuff = payload?.insufficient_support;
           const win = payload?.win_prob;
           const support = payload?.support ?? 0;
@@ -58,5 +73,13 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "8px",
     fontSize: "14px",
     color: "#1f2937",
+  },
+  empty: {
+    border: "1px dashed #e5e7eb",
+    borderRadius: "8px",
+    padding: "12px",
+    background: "#f8fafc",
+    color: "#475569",
+    fontSize: "13px",
   },
 };

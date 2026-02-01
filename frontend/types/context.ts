@@ -93,10 +93,12 @@ export type SessionAnalysis = {
 
 export type CoachPayload = {
   context: AnalysisContext;
-  insights: import("./insight").Insight[];
-  review: import("./review").ReviewAgendaItem[];
-  whatIf: import("./whatif").WhatIfOutcome;
+  insights?: import("./insight").Insight[];
+  review?: import("./review").ReviewAgendaItem[];
+  whatIf?: import("./whatif").WhatIfOutcome;
   assistant_message?: string;
+  answer_synthesis?: { claim?: string; confidence?: number; rationale?: string; [key: string]: unknown };
+  narrative?: { type?: string; confidence?: number | string | null; content?: unknown; [key: string]: unknown };
   inference_plan?: InferencePlan;
   patch_results?: PatchResult[];
   session_analysis?: SessionAnalysis;

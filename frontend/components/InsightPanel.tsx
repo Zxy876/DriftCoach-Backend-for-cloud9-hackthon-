@@ -10,8 +10,8 @@ function EmptyState({ title, description }: { title: string; description?: strin
   );
 }
 
-export function InsightPanel({ insights }: { insights: Insight[] | undefined }) {
-  const safeInsights = insights || [];
+export function InsightPanel({ insights }: { insights: Insight[] | undefined | null }) {
+  const safeInsights = Array.isArray(insights) ? insights : [];
 
   if (!safeInsights.length) {
     return <EmptyState title="尚未生成分析" description="请输入自然语言问题以触发分析挖掘" />;
