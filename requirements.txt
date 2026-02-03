@@ -1,5 +1,7 @@
 numpy
 scikit-learn
 fastapi
-uvicorn
+uvicorn[standard]
 requests
+pydantic
+python-dotenv
