@@ -30,6 +30,10 @@ from pydantic import BaseModel
 
 from driftcoach.core.state import State
 from driftcoach.core.action import Action
+from driftcoach.ml.outcome_model import OutcomeModel
+from driftcoach.ml.state_similarity import StateSimilarity
+from driftcoach.outputs.what_if import generate_what_if_analysis
+from driftcoach.narrative.what_if_narrative import render_what_if_narrative
 from driftcoach.main import build_registry, load_actions, _build_outputs
 from driftcoach.analysis.trigger import is_eligible
 from driftcoach.adapters.grid.client import GridClient
@@ -204,6 +208,12 @@ class CoachInit(BaseModel):
     grid_player_id: Optional[str] = None
 
 
+class WhatIfRequest(BaseModel):
+    state: Dict[str, Any]
+    history: Optional[List[Dict[str, Any]]] = None
+    alternatives: Optional[List[str]] = None
+
+
 def _allow_stats_fallback(data_source: str) -> bool:
     if (os.getenv("ALLOW_STATS_FALLBACK") or "").lower() == "true":
         return True
@@ -224,6 +234,49 @@ def _build_player_seeds(grid_player_id: Optional[str], data_source: str) -> List
     if grid_player_id and grid_player_id not in seeds:
         seeds.append(grid_player_id)
     return seeds
+
+
+def _parse_state(payload: Dict[str, Any]) -> State:
+    try:
+        return State.from_dict(payload)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=400, detail=f"invalid state payload: {exc}")
+
+
+def _fit_outcome_model(history_states: List[State]) -> OutcomeModel:
+    model = OutcomeModel()
+    train_states: List[State] = []
+    train_actions: List[Action] = []
+    train_outcomes: List[int] = []
+    for s in history_states:
+        act_raw = s.extras.get("action") if hasattr(s, "extras") else None
+        outcome_raw = s.extras.get("round_result") if hasattr(s, "extras") else None
+        if not act_raw or outcome_raw not in {"WIN", "LOSS"}:
+            continue
+        try:
+            act = Action(act_raw)
+        except Exception:
+            continue
+        train_states.append(s)
+        train_actions.append(act)
+        train_outcomes.append(1 if outcome_raw == "WIN" else 0)
+    if train_states and len(set(train_outcomes)) > 1:
+        try:
+            model.fit(train_states, train_actions, train_outcomes)
+        except Exception:
+            pass
+    return model
+
+
+def _build_similarity(history_states: List[State]) -> Optional[StateSimilarity]:
+    if not history_states:
+        return None
+    try:
+        sim = StateSimilarity(n_components=4, n_neighbors=min(10, len(history_states)))
+        sim.fit(history_states)
+        return sim
+    except Exception:
+        return None
 
 
 def _stats_confidence_tier(stats_results: List[Dict[str, Any]], aggregated_pack: Optional[Dict[str, Any]]) -> Tuple[str, str]:
@@ -2294,6 +2347,49 @@ def coach_init(body: CoachInit):
         context["meta"]["demo_remaining_queries"] = _demo_query_store.get(session_id, 0)
     logger.info("[INIT] context loaded, llm=DISABLED")
     return {"status": "READY", "context_loaded": True, "session_id": session_id, "context": context}
+
+
+@app.post("/what-if")
+async def analyze_what_if(request: WhatIfRequest):
+    """Counterfactual analysis: compare actions under current state."""
+
+    current_state = _parse_state(request.state)
+    history_states = [State.from_dict(s) for s in (request.history or [])]
+
+    outcome_model = _fit_outcome_model(history_states)
+    similarity = _build_similarity(history_states)
+
+    alternatives: List[Action] = []
+    for a in request.alternatives or []:
+        try:
+            alternatives.append(Action(a))
+        except Exception:
+            continue
+    if not alternatives:
+        alternatives = [Action.CONTEST, Action.SAVE]
+
+    outcome = generate_what_if_analysis(
+        current_state=current_state,
+        alternative_actions=alternatives,
+        model=outcome_model,
+        similarity_finder=similarity,
+    )
+
+    narrative = render_what_if_narrative(outcome)
+
+    serialized_outcomes: Dict[str, Any] = {
+        act.value: payload for act, payload in outcome.outcomes.items()
+    }
+
+    return {
+        "outcome": {
+            "state": getattr(outcome.state, "state_id", outcome.state),
+            "actions": [a.value for a in outcome.actions],
+            "outcomes": serialized_outcomes,
+            "confidence": outcome.confidence,
+        },
+        "narrative": narrative,
+    }
 
 
 @app.post("/api/coach/query")

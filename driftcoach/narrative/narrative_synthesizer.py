@@ -87,6 +87,19 @@ def _normalize_fact(f: Dict[str, Any]) -> Dict[str, Any]:
 def _format_datapoint(f: Dict[str, Any]) -> str:
     metrics = f.get("metrics") or {}
     note = f.get("note") or ""
+    scope = f.get("scope") or {}
+    player_name = scope.get("player_name") or f.get("player_name") or "该选手"
+    situation = f.get("situation") or scope.get("situation") or note
+
+    if isinstance(metrics.get("loss_rate"), (int, float)):
+        rate = metrics["loss_rate"] * 100
+        return f"- 当{player_name}处于“{situation or '特定情形'}”阵亡时，回合失败率 {rate:.1f}%"
+
+    if f.get("fact_type") == "ECONOMIC_PATTERN" and isinstance(metrics.get("win_rate"), (int, float)):
+        win_rate = metrics["win_rate"] * 100
+        sample = metrics.get("sample_count") or metrics.get("sample_size") or f.get("evidence", {}).get("sample_size")
+        return f"- 在强起/经济转换中，第二回合胜率 {win_rate:.1f}%（样本 {sample or 'N/A'} 局）"
+
     if metrics:
         parts = []
         for k, v in metrics.items():
@@ -123,6 +136,19 @@ def _friendly_fact_type(ft: str) -> str:
 
 
 def _impact_suggestion(ft: str) -> Tuple[str, str]:
+    strategy_map: Dict[str, Tuple[str, str]] = {
+        "FREE_DEATH_NO_KAST": (
+            "【影响】关键位无信息冒险导致首死，削弱后续回合胜率。",
+            "【建议】调整开局路线，确保首交火有队友接应并可交易。",
+        ),
+        "PISTOL_ROUND_LOSS_CHAIN": (
+            "【影响】手枪局失利叠加经济劣势，拉低整场胜率。",
+            "【建议】复盘手枪局道具与站位分配，必要时选择保守开局。",
+        ),
+    }
+
+    if ft in strategy_map:
+        return strategy_map[ft]
     if ft in {"ECONOMIC_PATTERN", "FORCE_BUY_ROUND", "ECO_COLLAPSE_SEQUENCE"}:
         return (
             "【影响】经济节奏被打断/强起失败加剧逆风。",
@@ -213,12 +239,53 @@ def _render_section(ft: str, grouped: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_dimension_narrative(dimension: str, facts: List[Dict]) -> str:
+    if dimension == "经济管理":
+        for f in facts:
+            if f.get("fact_type") == "FORCE_BUY_ROUND":
+                metrics = f.get("metrics") or {}
+                return (
+                    f"生态管理：第二轮强制购买成功率 {metrics.get('success_rate', 0)*100:.1f}%"
+                    f"（样本 {metrics.get('sample_count') or metrics.get('sample_size') or 'N/A'}）\n"
+                    "建议：明确强起/保存阈值，必要时连续 ECO 稳定经济。"
+                )
+    elif dimension == "手枪局策略":
+        for f in facts:
+            if f.get("fact_type") == "PISTOL_ROUND_LOSS_CHAIN":
+                metrics = f.get("metrics") or {}
+                return (
+                    f"手枪局胜率 {metrics.get('win_rate', 0)*100:.1f}%"
+                    f"（{metrics.get('lost_count', 0)}/{metrics.get('total_count', 0)}）\n"
+                    "建议：复盘手枪局默认站位与道具分配，优先抢关键信息点。"
+                )
+    elif dimension == "地图战术":
+        time_based = [f for f in facts if (f.get("metrics") or {}).get("avg_time_left", 99) < 20]
+        if time_based:
+            f = time_based[0]
+            metrics = f.get("metrics") or {}
+            return (
+                f"回合中期进攻：在地图 {f.get('map') or f.get('scope', {}).get('map') or '未知'} 中，"
+                f"{metrics.get('late_attack_count', 0)} 次进攻在剩余 <20s 发起，导致 {metrics.get('late_attack_loss_count', 0)} 次失利。\n"
+                "建议：提前规划进攻路径，保留换位与补道具的时间。"
+            )
+    elif dimension == "节奏管理":
+        slow_rounds = [f for f in facts if (f.get("metrics") or {}).get("avg_time_left", 99) < 20]
+        if slow_rounds:
+            metrics = slow_rounds[0].get("metrics") or {}
+            return (
+                f"平均剩余时间 <20s 的回合占比 {metrics.get('late_attack_ratio', 0)*100:.1f}%（样本 {metrics.get('sample_size') or 'N/A'}）\n"
+                "建议：前置信息与控图，降低拖到读秒的频次。"
+            )
+    return "相关数据不足，需进一步分析"
+
+
 def _synthesize_player_insight(facts: List[Dict[str, Any]], scope: Dict[str, Any]) -> NarrativeResult:
     norm_facts = [_normalize_fact(f) for f in facts if f.get("fact_type") and f.get("fact_type") != "CONTEXT_ONLY"]
     player_name = scope.get("player_name") or scope.get("player") or "该选手"
     data_points: List[str] = []
     impacts: List[str] = []
     actions: List[str] = []
+    causal_chains: List[str] = []
 
     for nf in norm_facts:
         dp = _format_datapoint(nf)
@@ -235,6 +302,27 @@ def _synthesize_player_insight(facts: List[Dict[str, Any]], scope: Dict[str, Any
             actions.append("- 优化首轮交火与支援时机，确保可交易，避免无支援首死")
         elif nf.get("fact_type") in {"HIGH_RISK_SEQUENCE"}:
             actions.append("- 复盘高风险推进的站位与时间点，明确提前信息与道具支持")
+
+        # 构建简单因果链（触发→后果→应对）
+        ft = nf.get("fact_type")
+        metrics = nf.get("metrics") or {}
+        trigger = None
+        consequence = None
+        if ft == "ROUND_SWING":
+            trigger = f"当{player_name}首杀但未获得KAST时"
+            if metrics.get("rounds_lost_after") is not None:
+                consequence = f"随后 {metrics.get('rounds_lost_after')} 回合失利率 {metrics.get('loss_rate', 0)*100:.1f}%"
+        elif ft == "FREE_DEATH_NO_KAST":
+            trigger = f"当{player_name}无支援首死时"
+            if metrics.get("loss_rate") is not None:
+                consequence = f"回合失败率升至 {metrics.get('loss_rate', 0)*100:.1f}%"
+
+        if trigger and consequence:
+            _, strategy = _impact_suggestion(ft)
+            causal_chains.append(f"- 触发：{trigger} → 后果：{consequence} → 应对：{strategy}")
+
+    if causal_chains:
+        impacts.extend(["【因果链】"] + causal_chains)
 
     template = _load_template("player_insight.md")
     content = template.format(
@@ -271,11 +359,39 @@ def _synthesize_match_review(facts: List[Dict[str, Any]], scope: Dict[str, Any])
     for ft in ordered_types:
         sections.append(_render_section(ft, grouped.get(ft, {})))
 
+    detected_dimensions: set[str] = set()
+    dimension_facts: Dict[str, List[Dict[str, Any]]] = {}
+
+    for nf in norm_facts:
+        ft = nf.get("fact_type")
+        metrics = nf.get("metrics") or {}
+
+        if ft in {"ECONOMIC_PATTERN", "FORCE_BUY_ROUND", "ECO_COLLAPSE_SEQUENCE"}:
+            detected_dimensions.add("经济管理")
+            dimension_facts.setdefault("经济管理", []).append(nf)
+        if ft == "PISTOL_ROUND_LOSS_CHAIN":
+            detected_dimensions.add("手枪局策略")
+            dimension_facts.setdefault("手枪局策略", []).append(nf)
+        if ft == "MAP_WEAK_POINT":
+            detected_dimensions.add("地图战术")
+            dimension_facts.setdefault("地图战术", []).append(nf)
+        if metrics.get("avg_time_left") is not None and metrics.get("avg_time_left") < 20:
+            detected_dimensions.add("节奏管理")
+            dimension_facts.setdefault("节奏管理", []).append(nf)
+
+    dimension_sections: List[str] = []
+    for dim in detected_dimensions:
+        narrative = _render_dimension_narrative(dim, dimension_facts.get(dim, []))
+        dimension_sections.append(f"【{dim}】\n{narrative}")
+
     content_lines: List[str] = []
     overview = f"赛制：{scope.get('match_format') or '未知'}；对手：{scope.get('opponent') or '未知'}；地图：{scope.get('map') or scope.get('map_name') or '未知'}"
     content_lines.append(f"复盘要点：本场主要问题集中在经济节奏与关键回合执行（若证据不足则视为低置信度）。")
     content_lines.append(f"【概览】{overview}")
     content_lines.extend(sections)
+    if dimension_sections:
+        content_lines.append("动态维度观察：")
+        content_lines.extend(dimension_sections)
     content = "\n\n".join(content_lines)
     content = refine_narrative(content, NarrativeType.MATCH_REVIEW_AGENDA.value)
     content = _truncate(content)
