@@ -100,6 +100,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add exception handler for Pydantic validation errors
+from pydantic import ValidationError
+from fastapi.requests import Request
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(ValidationError)
+async def validation_exception_handler(request: Request, exc: ValidationError):
+    logger.error("[VALIDATION] Request validation failed: %s", exc.errors())
+    return JSONResponse(
+        status_code=400,
+        content={
+            "detail": "Request validation failed",
+            "errors": exc.errors(),
+            "body": exc.body if hasattr(exc, 'body') else None
+        },
+    )
+
 _conversation_store: Dict[str, Dict[str, Any]] = {}
 _session_store: Dict[str, Dict[str, Any]] = {}
 _demo_query_store: Dict[str, int] = {}
@@ -2234,7 +2251,12 @@ def coach_init(body: CoachInit):
 def coach_query(body: CoachQuery):
     _rate_limit_guard()
 
+    # Detailed logging for debugging
+    logger.info("[QUERY] Received request: session_id=%s, coach_query=%s",
+                body.session_id, body.coach_query[:50] if body.coach_query else None)
+
     if not body.coach_query:
+        logger.warning("[QUERY] Missing coach_query in request")
         raise HTTPException(status_code=400, detail="coach_query is required")
 
     mode = (body.mode or "").lower()
@@ -2249,7 +2271,12 @@ def coach_query(body: CoachQuery):
     hackathon_snapshot = None
     if DATA_SOURCE == "grid":
         if not session_id or session_id not in _session_store:
-            raise HTTPException(status_code=400, detail="Context not initialized. Call /coach/init first.")
+            logger.warning("[QUERY] Session not found: session_id=%s, available_sessions=%s",
+                         session_id, list(_session_store.keys())[:5])
+            raise HTTPException(
+                status_code=400,
+                detail=f"Context not initialized. Call /coach/init first. (session_id: {session_id})"
+            )
         session = _session_store[session_id]
         if DEMO_MODE:
             remaining = _demo_query_store.get(session_id, DEMO_QUERY_LIMIT)
@@ -2809,6 +2836,7 @@ def health() -> Dict[str, Any]:
         "demo_series_id": DEMO_SERIES_ID,
         "memory_enabled": True,
         "bounds_enforced": True,
+        "active_sessions": list(_session_store.keys())[:10],  # Show first 10 session IDs
     }
 
 
