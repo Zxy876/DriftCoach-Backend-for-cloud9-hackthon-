@@ -85,7 +85,7 @@ async function renderByIntent(
 export async function renderInsight(insight?: Insight, opts: RenderOptions = {}): Promise<RenderedExplanation> {
   if (!insight) {
     return {
-      text: "暂无分析结果",
+      text: "No analysis available",
       trace: createTrace({
         intent: "insight-empty" as any,
         gameProfile: config.defaultGameId,
@@ -99,7 +99,7 @@ export async function renderInsight(insight?: Insight, opts: RenderOptions = {})
 
   if (!Array.isArray(insight.derivedFacts) || insight.derivedFacts.length === 0) {
     return {
-      text: "当前问题证据不足（INSUFFICIENT）",
+      text: "Insufficient evidence for this question (INSUFFICIENT)",
       trace: createTrace({
         intent: "insight-empty" as any,
         gameProfile: config.defaultGameId,

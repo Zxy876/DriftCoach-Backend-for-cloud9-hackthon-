@@ -303,6 +303,12 @@ export function App() {
           <li>This is not a recommendation</li>
         </ul>
       </section>
+      <footer style={styles.footer}>
+        <span>DriftCoach — MIT License</span>
+        <a href="https://github.com/Zxy876/DriftCoach-Backend-for-cloud9-hackthon-/blob/main/LICENSE" target="_blank" rel="noreferrer">
+          View LICENSE
+        </a>
+      </footer>
     </div>
   );
 }
@@ -373,5 +379,13 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#b91c1c",
     border: "1px solid #fecdd3",
     borderRadius: "8px",
+  },
+  footer: {
+    marginTop: "24px",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    fontSize: "12px",
+    color: "#475569",
   },
 };

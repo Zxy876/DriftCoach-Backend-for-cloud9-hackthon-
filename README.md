@@ -71,3 +71,6 @@ CONTEXT_ONLY 表示只返回上下文而不下结论。触发原因包括数据�
 不面向：
 - ❌ 博彩工具
 - ❌ 即时战术助手
+
+## 9️⃣ License
+- MIT License. See `LICENSE` for details.

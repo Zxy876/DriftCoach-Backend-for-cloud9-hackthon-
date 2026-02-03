@@ -27,7 +27,7 @@ export function SessionAnalysisPanel({ analysis }: SessionAnalysisPanelProps) {
       <div style={styles.headerRow}>
         <div>
           <h3 style={styles.title}>Session Analysis</h3>
-          <p style={styles.subtitle}>每次提问都在累积认知</p>
+          <p style={styles.subtitle}>Each question compounds understanding</p>
         </div>
         <div style={styles.badges}>
           <span style={styles.badge}>Series {seriesCount}</span>
@@ -37,13 +37,13 @@ export function SessionAnalysisPanel({ analysis }: SessionAnalysisPanelProps) {
       </div>
 
       <div style={styles.metaRow}>
-        <span>更新时间：{last_updated_at || "—"}</span>
-        <span>新增节点：{recently_added_node_ids.length}</span>
+        <span>Updated: {last_updated_at || "—"}</span>
+        <span>New nodes: {recently_added_node_ids.length}</span>
       </div>
 
       <div style={styles.list}>
         {sortedNodes.length === 0 ? (
-          <div style={styles.empty}>暂无分析节点，提问以生成。</div>
+          <div style={styles.empty}>No analysis nodes yet. Ask questions to generate.</div>
         ) : (
           sortedNodes.map((node: SessionAnalysisNode) => {
             const highlight = isNew.has(node.node_id);
@@ -60,8 +60,8 @@ export function SessionAnalysisPanel({ analysis }: SessionAnalysisPanelProps) {
                   <div style={styles.nodeType}>{node.type}</div>
                   <div style={styles.nodeSource}>{node.source}</div>
                 </div>
-                <div style={styles.row}>首次提问：{node.created_from_query}</div>
-                <div style={styles.row}>最近更新：{node.last_updated_at}</div>
+                <div style={styles.row}>First question: {node.created_from_query}</div>
+                <div style={styles.row}>Last updated: {node.last_updated_at}</div>
               </div>
             );
           })

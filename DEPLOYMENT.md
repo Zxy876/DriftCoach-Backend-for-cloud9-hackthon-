@@ -1,45 +1,45 @@
-# 🚀 Drift Coach 极速部署指南
+# 🚀 Drift Coach Fast Deployment Guide
 
-**目标**：无 VPS、无备案、无运维的前提下，最快上线可访问 Demo
+**Goal**: Ship an accessible demo as fast as possible with no VPS, no ICP filing, and no ops overhead.
 
-- **后端**: FastAPI → Railway
-- **前端**: React/Vite → Vercel
-- **部署时间**: 约 10 分钟
-
----
-
-## 📋 部署前准备
-
-确保你已有：
-- ✅ GitHub 账号
-- ✅ 本项目已推送到 GitHub
-- ✅ Railway 和 Vercel 账号（用 GitHub 登录即可）
+- **Backend**: FastAPI → Railway
+- **Frontend**: React/Vite → Vercel
+- **Time**: ~10 minutes
 
 ---
 
-## 一、后端部署（Railway）⚡
+## 📋 Prerequisites
 
-### 1️⃣ 创建 Railway 项目
+Make sure you have:
+- ✅ GitHub account
+- ✅ This project pushed to GitHub
+- ✅ Railway and Vercel accounts (sign in with GitHub)
 
-1. 打开 https://railway.app
-2. 使用 **GitHub 登录**
-3. 点击 **New Project** → **Deploy from GitHub repo**
-4. 选择 `DriftCoach-Backend-for-cloud9-hackthon-` 仓库
+---
 
-### 2️⃣ Railway 自动识别
+## I. Backend on Railway ⚡
 
-Railway 会自动检测到：
-- ✅ `requirements.txt` (Python 依赖)
-- ✅ `Procfile` (启动命令)
-- ✅ `driftcoach/api.py` (FastAPI 应用)
+### 1️⃣ Create a Railway project
 
-**无需任何额外配置**，Railway 会自动构建！
+1. Visit https://railway.app
+2. Sign in with **GitHub**
+3. Click **New Project** → **Deploy from GitHub repo**
+4. Select the `DriftCoach-Backend-for-cloud9-hackthon-` repo
 
-### 3️⃣ 设置环境变量 ⚙️
+### 2️⃣ Auto-detection
 
-在 Railway 项目中：
-1. 点击项目 → **Variables** 标签
-2. 添加以下环境变量：
+Railway will auto-detect:
+- ✅ `requirements.txt` (Python deps)
+- ✅ `Procfile` (start command)
+- ✅ `driftcoach/api.py` (FastAPI app)
+
+No extra config needed—Railway builds automatically.
+
+### 3️⃣ Set environment variables ⚙️
+
+In the Railway project:
+1. Open project → **Variables** tab
+2. Add the following variables:
 
 ```bash
 DATA_SOURCE=grid
@@ -49,39 +49,39 @@ GRID_PLAYER_ID=91
 CORS_ALLOW_ORIGINS=*
 ```
 
-⚠️ **必须全部填写**，否则后端无法启动！
+⚠️ **Fill all of them** or the backend will not start.
 
-### 4️⃣ 获取后端 URL
+### 4️⃣ Get backend URL
 
-部署成功后，Railway 会生成一个 URL，格式类似：
+After deploy, Railway gives you a URL like:
 
 ```
 https://driftcoach-backend-production.up.railway.app
 ```
 
-**验证后端是否运行**：
+**Verify**:
 
 ```bash
-curl https://<你的railway-url>/api/demo
+curl https://<your-railway-url>/api/demo
 ```
 
-应该返回 `200 OK` 和 JSON 数据。
+Should return `200 OK` with JSON.
 
 ---
 
-## 二、前端部署（Vercel）🎨
+## II. Frontend on Vercel 🎨
 
-### 1️⃣ 配置前端环境变量
+### 1️⃣ Frontend env vars
 
-在 `frontend` 目录下创建 `.env` 文件：
+Create `frontend/.env`:
 
 ```bash
-VITE_API_BASE=https://<你的railway-url>/api
+VITE_API_BASE=https://<your-railway-url>/api
 ```
 
-⚠️ 替换 `<你的railway-url>` 为上一步 Railway 给你的 URL
+⚠️ Replace `<your-railway-url>` with the Railway URL above.
 
-### 2️⃣ 推送代码到 GitHub
+### 2️⃣ Push to GitHub
 
 ```bash
 git add .
@@ -89,111 +89,109 @@ git commit -m "Add Railway & Vercel deployment config"
 git push
 ```
 
-### 3️⃣ Vercel 部署
+### 3️⃣ Deploy on Vercel
 
-1. 打开 https://vercel.com
-2. 使用 **GitHub 登录**
-3. 点击 **Import Project**
-4. 选择 `DriftCoach-Backend-for-cloud9-hackthon-` 仓库
-5. 配置如下：
+1. Visit https://vercel.com
+2. Sign in with **GitHub**
+3. Click **Import Project**
+4. Choose the `DriftCoach-Backend-for-cloud9-hackthon-` repo
+5. Configure:
 
 **Root Directory**: `frontend`  
 **Build Command**: `npm run build`  
 **Output Directory**: `dist`
 
-### 4️⃣ 添加 Vercel 环境变量
+### 4️⃣ Add Vercel env vars
 
-在 Vercel 项目设置中：
-1. 进入 **Settings** → **Environment Variables**
-2. 添加：
+In Vercel project settings:
+1. Go to **Settings** → **Environment Variables**
+2. Add:
 
 ```bash
-VITE_API_BASE=https://<你的railway-url>/api
+VITE_API_BASE=https://<your-railway-url>/api
 ```
 
-3. 点击 **Redeploy** 重新部署
+3. Click **Redeploy**
 
 ---
 
-## 三、验收测试 ✅
+## III. Acceptance ✅
 
-打开 Vercel 给你的前端 URL（类似 `https://driftcoach.vercel.app`），测试以下问题：
+Open the Vercel frontend URL (e.g., `https://driftcoach.vercel.app`) and ask:
 
-### 测试问题：
+1. **Give the review agenda for this match.**
+2. **Where are the economic management issues?**
+3. **Is this a high-risk matchup?**
+4. **Summarize the key lessons.**
 
-1. **请给这场比赛的复盘议程**
-2. **这场比赛的经济管理问题在哪里？**
-3. **这是不是一场高风险对局？**
-4. **请总结这场比赛的关键教训**
-
-### 要求：
-- ✅ 页面不崩溃
-- ✅ 不进入安全模式
-- ✅ 不同问题给出不同答案
+Requirements:
+- ✅ Page stays up
+- ✅ No safe mode
+- ✅ Different answers per question
 
 ---
 
-## 四、交付清单 📦
+## IV. Deliverables 📦
 
-完成后，你将获得：
+You will get:
 
-1. ✅ **后端 URL** (Railway): `https://<your-app>.up.railway.app`
-2. ✅ **前端 URL** (Vercel): `https://<your-app>.vercel.app`
-3. ✅ **Demo 状态**: 已在浏览器完整跑通
+1. ✅ **Backend URL** (Railway): `https://<your-app>.up.railway.app`
+2. ✅ **Frontend URL** (Vercel): `https://<your-app>.vercel.app`
+3. ✅ **Demo status**: Confirmed working in browser
 
 ---
 
-## 🔧 常见问题
+## 🔧 FAQs
 
-### Railway 被限流怎么办？
+### Railway rate-limited?
 
-**Plan B** (次快选择)：
-- [Render](https://render.com) - 免费但部署较慢
-- [Fly.io](https://fly.io) - 稳定但需要信用卡验证
+**Plan B** (slightly slower):
+- [Render](https://render.com) — free but slower deploys
+- [Fly.io](https://fly.io) — stable but needs credit card
 
-### Vercel 部署失败？
+### Vercel deploy failed?
 
-检查：
-1. `frontend/package.json` 中是否有 `build` 脚本
-2. `VITE_API_BASE` 是否正确设置
-3. 尝试重新部署
+Check:
+1. `frontend/package.json` has `build` script
+2. `VITE_API_BASE` is set correctly
+3. Redeploy
 
-### API 返回 CORS 错误？
+### API CORS errors?
 
-确保 Railway 环境变量中设置了：
+Ensure Railway variable:
 ```bash
 CORS_ALLOW_ORIGINS=*
 ```
 
 ---
 
-## 📝 项目文件说明
+## 📝 Project files
 
-已为你创建以下部署文件：
+We created:
 
-- `Procfile` - Railway 启动命令
-- `.env.example` - 后端环境变量模板
-- `frontend/.env.example` - 前端环境变量模板
-- `requirements.txt` - Python 依赖（已更新）
-
----
-
-## ⚡ 约束条件
-
-- ❌ 不做性能优化
-- ❌ 不上 Docker/VPS
-- ❌ 不重构架构
-- ✅ **只保证 Demo 可访问、可演示**
+- `Procfile` - Railway start command
+- `.env.example` - Backend env template
+- `frontend/.env.example` - Frontend env template
+- `requirements.txt` - Python deps (updated)
 
 ---
 
-## 🎯 下一步
+## ⚡ Constraints
 
-1. **立即部署后端** → Railway
-2. **立即部署前端** → Vercel
-3. **测试 Demo** → 浏览器验证
-4. **交付链接** → 给项目负责人
+- ❌ No performance tuning
+- ❌ No Docker/VPS
+- ❌ No architecture refactor
+- ✅ Only ensure demo is accessible and demo-ready
 
-**预计总时间**: 10-15 分钟
+---
+
+## 🎯 Next steps
+
+1. **Deploy backend** → Railway
+2. **Deploy frontend** → Vercel
+3. **Test demo** → Browser verification
+4. **Share links** → Send to owner
+
+**Expected time**: 10–15 minutes
 
 Good luck! 🚀
