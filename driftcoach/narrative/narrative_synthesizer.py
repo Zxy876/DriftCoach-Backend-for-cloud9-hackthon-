@@ -446,6 +446,36 @@ def _synthesize_match_summary(facts: List[Dict[str, Any]], scope: Dict[str, Any]
     )
 
 
+def _synthesize_what_if(facts: List[Dict[str, Any]], scope: Dict[str, Any]) -> NarrativeResult:
+    """Lightweight what-if narrative; uses available facts/metrics if present."""
+    lines: List[str] = []
+    state_desc = scope.get("state_id") or scope.get("map") or "当前状态"
+    lines.append(f"假设分析：{state_desc}")
+
+    used = 0
+    for f in facts or []:
+        ft = f.get("fact_type") or "SCENARIO"
+        metrics = f.get("metrics") or {}
+        win_prob = metrics.get("win_prob")
+        support = metrics.get("support_count") or metrics.get("support")
+        action = f.get("action") or f.get("note") or ft
+        if win_prob is not None:
+            lines.append(f"- 选项 {action}: 预测胜率 {float(win_prob)*100:.1f}% (样本 {support or 'N/A'})")
+            used += 1
+    if used == 0:
+        lines.append("- 当前缺少相似局样本，建议补充历史数据后再评估不同选择的胜率差异。")
+
+    content = "\n".join(lines)
+    content = refine_narrative(content, NarrativeType.SUMMARY_REPORT.value)
+    confidence = 0.4 if used == 0 else min(0.85, 0.5 + min(used / 6.0, 0.3))
+    return NarrativeResult(
+        narrative_type=NarrativeType.WHAT_IF_REPORT,
+        content=content,
+        confidence=confidence,
+        used_facts=used,
+    )
+
+
 def synthesize_narrative(narrative_type: NarrativeType, facts: List[Dict[str, Any]], scope: Dict[str, Any]) -> NarrativeResult:
     if narrative_type == NarrativeType.PLAYER_INSIGHT_REPORT:
         return _synthesize_player_insight(facts, scope)
@@ -453,4 +483,6 @@ def synthesize_narrative(narrative_type: NarrativeType, facts: List[Dict[str, An
         return _synthesize_match_review(facts, scope)
     if narrative_type == NarrativeType.SUMMARY_REPORT:
         return _synthesize_match_summary(facts, scope)
+    if narrative_type == NarrativeType.WHAT_IF_REPORT:
+        return _synthesize_what_if(facts, scope)
     raise ValueError(f"Unsupported narrative type: {narrative_type}")

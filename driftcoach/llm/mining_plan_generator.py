@@ -143,7 +143,7 @@ def _intent_and_facts_from_query(coach_query: str, last_player_name: Optional[st
         if "player" not in entities:
             entities.append("player")
 
-    if (player_name or has_any(["球员", "选手", "个人表现", "洞察", "报告"])) and has_any(["问题", "表现", "分析", "洞察", "report", "insight"]) and not is_map_question:
+    if (player_name or has_any(["球员", "选手", "个人表现", "洞察", "报告", "数据"])) and has_any(["问题", "表现", "分析", "洞察", "report", "insight", "反馈"]) and not is_map_question:
         intent = "PLAYER_REVIEW"
         question_type = "SUMMARY"
         required_facts = ["PLAYER_IMPACT_STAT", "ROUND_SWING", "HIGH_RISK_SEQUENCE"]
