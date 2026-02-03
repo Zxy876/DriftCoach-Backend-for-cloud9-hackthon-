@@ -5,6 +5,29 @@ from typing import List, Tuple
 from driftcoach.question_state import DerivedFinding, QuestionState
 
 
+def _to_fact_dict(findings: List[DerivedFinding]) -> List[dict]:
+    facts: List[dict] = []
+    for f in findings:
+        fact_dict = {
+            "fact_type": f.type,
+            "note": f.summary,
+            "confidence": f.confidence,
+            "scope": f.scope if hasattr(f, "scope") else {},
+        }
+        if getattr(f, "supporting_facts", None):
+            metrics = {}
+            for sf in f.supporting_facts:
+                scope = getattr(sf, "scope", None)
+                if isinstance(scope, dict):
+                    for k, v in scope.items():
+                        if k not in metrics:
+                            metrics[k] = v
+            if metrics:
+                fact_dict["metrics"] = metrics
+        facts.append(fact_dict)
+    return facts
+
+
 def _render_sections(findings: List[DerivedFinding]) -> List[str]:
     lines: List[str] = []
     grouped = {}
@@ -61,13 +84,31 @@ def _player(findings: List[DerivedFinding]) -> Tuple[str, float]:
 
 
 def render_narrative_from_findings(question_state: QuestionState, findings: List[DerivedFinding]) -> Tuple[str, float]:
+    from driftcoach.narrative.narrative_synthesizer import synthesize_narrative
+    from driftcoach.narrative.narrative_types import NarrativeType
+
     intent = question_state.intent
-    if intent == "MATCH_REVIEW":
+    scope_hint = {
+        "player_name": getattr(question_state, "scope", None) if isinstance(getattr(question_state, "scope", None), str) else None,
+    }
+
+    facts = _to_fact_dict(findings)
+
+    if intent == "PLAYER_REVIEW":
+        narrative_type = NarrativeType.PLAYER_INSIGHT_REPORT
+    elif intent == "MATCH_REVIEW":
+        narrative_type = NarrativeType.MATCH_REVIEW_AGENDA
+    elif intent == "SUMMARY" or question_state.scope == "SUMMARY":
+        narrative_type = NarrativeType.SUMMARY_REPORT
+    else:
+        # fallback to legacy sections
+        if intent == "MATCH_REVIEW":
+            return _match_review(findings)
+        if question_state.scope == "ECON":
+            return _econ(findings)
+        if question_state.scope == "PLAYER":
+            return _player(findings)
         return _match_review(findings)
-    if intent == "SUMMARY" or question_state.scope == "SUMMARY":
-        return _summary(findings)
-    if question_state.scope == "ECON":
-        return _econ(findings)
-    if question_state.scope == "PLAYER":
-        return _player(findings)
-    return _match_review(findings)
+
+    result = synthesize_narrative(narrative_type, facts, scope_hint)
+    return result.content, result.confidence
