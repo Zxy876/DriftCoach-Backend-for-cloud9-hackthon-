@@ -1,10 +1,14 @@
 """
 Deterministic AI Inference Orchestrator with evidence gate.
 Goal: when key facts are missing, force EVIDENCE_INSUFFICIENT and emit 1-2 patches.
+
+Now uses probabilistic gate with three-way decisions: ACCEPT / LOW_CONFIDENCE / REJECT
 """
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple, Optional
+
+from .probabilistic_gate import legacy_gate_wrapper, GateDecision
 
 MAX_RATIONALE_CHARS = 600
 
@@ -23,38 +27,13 @@ def evidence_gate(
     intent: Optional[str] = None,
     required_facts: Optional[List[str]] = None,
 ) -> Tuple[str, List[str]]:
-    """Returns (decision, reasons). decision in {INSUFFICIENT, SUFFICIENT}."""
-    reasons: List[str] = []
-    schema = context.get("schema", {}) or {}
-    ev = context.get("evidence", {}) or {}
-    req_facts = required_facts or []
-    is_event_intent = any(str(fact).endswith("_ROUND") or str(fact).endswith("_SEQUENCE") for fact in req_facts)
+    """
+    Returns (decision, reasons). decision in {INSUFFICIENT, SUFFICIENT}.
 
-    outcome_field = schema.get("outcome_field") or schema.get("outcomeField") or "UNKNOWN"
-    aggregation_available = bool(ev.get("aggregation_available"))
-    states_count = int(ev.get("states_count", 0) or 0)
-    series_pool = int(ev.get("seriesPool", ev.get("series_pool", 0) or 0))
-    by_type = ev.get("by_type", {}) or {}
-    agg_perf = int(by_type.get("AGGREGATED_PERFORMANCE", 0) or 0)
-
-    # Hard insufficient conditions
-    if outcome_field == "NOT_FOUND" and not aggregation_available:
-        reasons.append("outcome_field_not_found_and_no_aggregation")
-    if states_count < 20:
-        reasons.append("states_lt_20")
-    if series_pool == 0 and not is_event_intent:
-        reasons.append("series_pool_zero")
-    if agg_perf == 0:
-        reasons.append("agg_performance_zero")
-
-    if reasons:
-        return "INSUFFICIENT", reasons
-
-    # SUFFICIENT only if all of these hold
-    if states_count >= 20 and (outcome_field != "NOT_FOUND" or agg_perf >= 2) and series_pool > 0:
-        return "SUFFICIENT", ["states_ge_20", "aggregation_present", "series_pool_gt_0"]
-
-    return "INSUFFICIENT", ["fallback_insufficient"]
+    Now uses probabilistic gate internally (maintains backward compatibility).
+    For new code, consider using probabilistic_evidence_gate directly.
+    """
+    return legacy_gate_wrapper(context, recent_evidence, intent, required_facts)
 
 
 def _default_patches(anchor_context: Dict[str, Any]) -> List[Dict[str, Any]]:

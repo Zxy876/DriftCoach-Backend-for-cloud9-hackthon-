@@ -67,6 +67,8 @@ from driftcoach.session.analysis_store import SessionAnalysisStore
 from driftcoach.hackathon.series_pipeline import hackathon_mine_and_analyze
 from driftcoach.narrative import synthesize_narrative, NarrativeType
 from driftcoach.narrative.orchestration import run_narrative_orchestration
+from driftcoach.memory.store import MemoryStore, DerivedFinding, QueryRecord
+from driftcoach.config.bounds import DEFAULT_BOUNDS
 
 
 logger = logging.getLogger(__name__)
@@ -101,6 +103,9 @@ app.add_middleware(
 _conversation_store: Dict[str, Dict[str, Any]] = {}
 _session_store: Dict[str, Dict[str, Any]] = {}
 _demo_query_store: Dict[str, int] = {}
+
+# Memory store for findings, gate decisions, and queries
+_memory_store = MemoryStore(db_path="driftcoach_memory.db")
 
 
 def _rate_limit_guard() -> None:
@@ -2364,7 +2369,43 @@ def coach_query(body: CoachQuery):
                 facts=facts_by_type,
                 series_id=grid_series_id_local,
             )
-            ans_result = synthesize_answer(ans_input)
+            # Apply hard bounds on findings
+            ans_result = synthesize_answer(ans_input, bounds=DEFAULT_BOUNDS)
+
+            # Store query and findings in memory
+            if session_id:
+                # Extract findings from facts
+                finding_ids = []
+                for fact_type, fact_list in facts_by_type.items():
+                    for fact in fact_list[:DEFAULT_BOUNDS.max_findings_per_intent]:
+                        finding = DerivedFinding(
+                            finding_id=MemoryStore.generate_id(),
+                            session_id=session_id,
+                            intent=mining_plan.get("intent") or "UNKNOWN",
+                            fact_type=fact_type,
+                            content=fact,
+                            confidence=fact.get("confidence", 0.7),
+                            created_at=MemoryStore.now(),
+                            series_id=grid_series_id_local,
+                            player_id=player_focus,
+                            metadata={"source": "hackathon_query"},
+                        )
+                        if _memory_store.store_finding(finding):
+                            finding_ids.append(finding.finding_id)
+
+                # Store query record
+                query_record = QueryRecord(
+                    query_id=MemoryStore.generate_id(),
+                    session_id=session_id,
+                    query_text=body.coach_query,
+                    intent=mining_plan.get("intent") or "UNKNOWN",
+                    findings_ids=finding_ids,
+                    created_at=MemoryStore.now(),
+                    series_id=grid_series_id_local,
+                    player_id=player_focus,
+                )
+                _memory_store.store_query(query_record)
+
         context_meta["answer_synthesis"] = asdict(ans_result)
 
         # Narrative orchestration: auto-run composite intents to harvest facts
@@ -2377,6 +2418,7 @@ def coach_query(body: CoachQuery):
                 body.coach_query,
                 player_id=player_focus,
                 player_name=player_name,
+                bounds=DEFAULT_BOUNDS,  # Apply hard bounds
             )
             if extra_evidence:
                 file_facts_extra = [e for e in extra_evidence if e.get("type") == "FILE_FACT"]
@@ -2708,6 +2750,56 @@ def get_demo() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Failed to load demo payload") from exc
 
 
+@app.get("/api/coach/memory")
+def get_memory(
+    session_id: Optional[str] = None,
+    intent: Optional[str] = None,
+    limit: int = 10,
+) -> Dict[str, Any]:
+    """
+    Retrieve historical memory (findings, queries, gate stats).
+
+    Query params:
+    - session_id: Filter by session
+    - intent: Filter by intent type
+    - limit: Max results to return (default 10)
+    """
+    try:
+        # Get findings
+        if session_id:
+            findings = _memory_store.get_findings_by_session(session_id)
+        elif intent:
+            findings = _memory_store.get_findings_by_intent(intent, limit=limit)
+        else:
+            # Return recent findings from any session
+            findings = _memory_store.get_findings_by_intent("", limit=limit)
+
+        # Get gate decision stats
+        stats = _memory_store.get_gate_decision_stats(intent=intent)
+
+        return {
+            "status": "ok",
+            "findings": [
+                {
+                    "finding_id": f.finding_id,
+                    "session_id": f.session_id,
+                    "intent": f.intent,
+                    "fact_type": f.fact_type,
+                    "confidence": f.confidence,
+                    "created_at": f.created_at,
+                    "series_id": f.series_id,
+                    "content": f.content,
+                }
+                for f in findings[:limit]
+            ],
+            "gate_stats": stats,
+            "count": len(findings),
+        }
+    except Exception as exc:
+        logger.error("[MEMORY] Failed to retrieve memory", exc_info=exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
     return {
@@ -2715,6 +2807,8 @@ def health() -> Dict[str, Any]:
         "data_source": DATA_SOURCE,
         "demo_mode": DEMO_MODE,
         "demo_series_id": DEMO_SERIES_ID,
+        "memory_enabled": True,
+        "bounds_enforced": True,
     }
 
 
