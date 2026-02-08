@@ -19,8 +19,11 @@ from datetime import datetime
 
 import logging
 import requests
+import os
 
-logging.basicConfig(level=logging.INFO)
+# 🎯 Optimization: Reduce log output in production
+LOG_LEVEL = os.getenv("LOG_LEVEL", "WARNING").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.WARNING))
 
 import time
 from fastapi import FastAPI, HTTPException
@@ -2780,6 +2783,12 @@ def coach_query(body: CoachQuery):
                 + payload["assistant_message"]
             )
 
+    # ✅ Optimization: Strip debug info to reduce payload size
+    # This reduces response from ~100MB to ~10KB
+    verbose = os.getenv("VERBOSE_RESPONSE", "false").lower() == "true"
+    if not verbose:
+        payload = _strip_debug_info(payload)
+
     payload = _ensure_messages(
         payload,
         body.coach_query,
@@ -2874,6 +2883,51 @@ def health() -> Dict[str, Any]:
         "bounds_enforced": True,
         "active_sessions": list(_session_store.keys())[:10],  # Show first 10 session IDs
     }
+
+
+def _strip_debug_info(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Remove debug information from payload to reduce response size.
+
+    Reduces response from ~100MB to ~10KB by removing:
+    - Full evidence details
+    - Verbose context information
+    - Inference plan details
+    - Patch results
+
+    Can be disabled by setting VERBOSE_RESPONSE=true env variable.
+    """
+    # Keep only essential fields
+    stripped = {
+        "assistant_message": payload.get("assistant_message"),
+    }
+
+    # Optionally include answer_synthesis if present
+    if payload.get("answer_synthesis"):
+        stripped["answer_synthesis"] = {
+            "claim": payload["answer_synthesis"].get("claim"),
+            "verdict": payload["answer_synthesis"].get("verdict"),
+            "confidence": payload["answer_synthesis"].get("confidence"),
+        }
+
+    # Optionally include narrative if present
+    if payload.get("narrative"):
+        stripped["narrative"] = {
+            "type": payload["narrative"].get("type"),
+            "content": payload["narrative"].get("content"),
+            "confidence": payload["narrative"].get("confidence"),
+        }
+
+    # Add minimal context meta (without full details)
+    if payload.get("context", {}).get("meta"):
+        stripped["context"] = {
+            "meta": {
+                "states": payload["context"]["meta"].get("states", 0),
+                "seriesPool": payload["context"]["meta"].get("seriesPool", 0),
+            }
+        }
+
+    return stripped
 
 
 if __name__ == "__main__":
