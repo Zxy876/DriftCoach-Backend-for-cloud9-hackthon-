@@ -2737,7 +2737,15 @@ def coach_query(body: CoachQuery):
     payload["patch_results"] = patch_results
     payload["stats_results"] = stats_results
 
-    if inference_plan.get("rationale"):
+    # ✅ 1→2 Breakthrough: Prioritize DecisionMapper result over old gate rationale
+    # If DecisionMapper has generated a result, use it instead of inference_plan rationale
+    answer_synthesis = context_meta.get("answer_synthesis", {})
+    if answer_synthesis.get("claim") and answer_synthesis.get("verdict") != "INSUFFICIENT":
+        # DecisionMapper provided a valid answer (DEGRADED or STANDARD)
+        # Use its claim instead of the old gate's "证据不足"
+        payload["assistant_message"] = answer_synthesis.get("claim")
+    elif inference_plan.get("rationale"):
+        # Fallback to old gate logic
         payload["assistant_message"] = inference_plan.get("rationale")
 
     logger.info(

@@ -1,9 +1,18 @@
 # 1→2 跨越完成：快速参考
 
-## 🎯 瓶颈已解决
+## 🎯 两个瓶颈已解决
 
-**问题**：DecisionMapper 已实现但未集成到主流程
+### **瓶颈 1**：DecisionMapper 未集成到主流程
+**问题**：DecisionMapper 已实现但未调用
 **解决**：在 [api.py:2399-2420](driftcoach/api.py#L2399-L2420) 集成 DecisionMapper
+
+### **瓶颈 2**：旧门控逻辑覆盖 DecisionMapper 结果
+**问题**：`inference_plan["rationale"]` 覆盖了 DecisionMapper 的输出
+**解决**：在 [api.py:2732-2747](driftcoach/api.py#L2732-L2747) 建立 DecisionMapper 优先级
+
+**详见**：
+- [BOTTLENECK_RESOLUTION.md](BOTTLENECK_RESOLUTION.md) - 第一个瓶颈
+- [BOTTLENECK_RESOLUTION_2.md](BOTTLENECK_RESOLUTION_2.md) - 第二个瓶颈
 
 ---
 
