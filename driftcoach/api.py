@@ -63,6 +63,7 @@ from driftcoach.llm.orchestrator import generate_inference_plan
 from driftcoach.llm.mining_plan_generator import generate_mining_plan
 from driftcoach.session import session_analysis_store, build_analysis_node_from_agg, build_snapshot_from_stats_results
 from driftcoach.analysis.answer_synthesizer import AnswerInput, AnswerSynthesisResult, synthesize_answer, render_answer
+from driftcoach.analysis.decision_mapper import DecisionMapper
 from driftcoach.session.analysis_store import SessionAnalysisStore
 from driftcoach.hackathon.series_pipeline import hackathon_mine_and_analyze
 from driftcoach.narrative import synthesize_narrative, NarrativeType
@@ -2396,8 +2397,35 @@ def coach_query(body: CoachQuery):
                 facts=facts_by_type,
                 series_id=grid_series_id_local,
             )
-            # Apply hard bounds on findings
-            ans_result = synthesize_answer(ans_input, bounds=DEFAULT_BOUNDS)
+
+            # ✅ 1→2 Breakthrough: Use DecisionMapper for degraded decisions
+            # Build context for decision mapper
+            context_for_decision = {
+                "schema": context_meta.get("hackathon_evidence", [{}])[0].get("schema") or {},
+                "evidence": {
+                    "states_count": len(file_facts),
+                    "seriesPool": context_meta.get("hackathon_evidence", [{}])[0].get("seriesPool", 0)
+                }
+            }
+
+            # Use DecisionMapper to generate decision (supports DEGRADED path)
+            mapper = DecisionMapper()
+            decision = mapper.map_to_decision(
+                context=context_for_decision,
+                intent=ans_input.intent,
+                facts=facts_by_type,
+                bounds=DEFAULT_BOUNDS
+            )
+
+            # Convert CoachingDecision to AnswerSynthesisResult
+            ans_result = AnswerSynthesisResult(
+                claim=decision.claim,
+                verdict=decision.verdict,
+                confidence=decision.confidence,
+                support_facts=decision.support_facts,
+                counter_facts=decision.counter_facts,
+                followups=decision.followups
+            )
 
             # Store query and findings in memory
             if session_id:
