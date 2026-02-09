@@ -2401,34 +2401,10 @@ def coach_query(body: CoachQuery):
                 series_id=grid_series_id_local,
             )
 
-            # ✅ 1→2 Breakthrough: Use DecisionMapper for degraded decisions
-            # Build context for decision mapper
-            context_for_decision = {
-                "schema": context_meta.get("hackathon_evidence", [{}])[0].get("schema") or {},
-                "evidence": {
-                    "states_count": len(file_facts),
-                    "seriesPool": context_meta.get("hackathon_evidence", [{}])[0].get("seriesPool", 0)
-                }
-            }
-
-            # Use DecisionMapper to generate decision (supports DEGRADED path)
-            mapper = DecisionMapper()
-            decision = mapper.map_to_decision(
-                context=context_for_decision,
-                intent=ans_input.intent,
-                facts=facts_by_type,
-                bounds=DEFAULT_BOUNDS
-            )
-
-            # Convert CoachingDecision to AnswerSynthesisResult
-            ans_result = AnswerSynthesisResult(
-                claim=decision.claim,
-                verdict=decision.verdict,
-                confidence=decision.confidence,
-                support_facts=decision.support_facts,
-                counter_facts=decision.counter_facts,
-                followups=decision.followups
-            )
+            # ✅ Phase 2: Use Spec-based divide-and-conquer synthesizer
+            # This routes intents to handlers (e.g., RiskAssessmentHandler → RISK_SPEC)
+            # which filters facts by spec contract (visibility reduction)
+            ans_result = synthesize_answer(ans_input, bounds=DEFAULT_BOUNDS)
 
             # Store query and findings in memory
             if session_id:
