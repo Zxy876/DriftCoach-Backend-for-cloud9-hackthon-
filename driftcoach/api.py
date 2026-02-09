@@ -2884,6 +2884,9 @@ def _strip_debug_info(payload: Dict[str, Any]) -> Dict[str, Any]:
             "claim": payload["answer_synthesis"].get("claim"),
             "verdict": payload["answer_synthesis"].get("verdict"),
             "confidence": payload["answer_synthesis"].get("confidence"),
+            "support_facts": payload["answer_synthesis"].get("support_facts", []),
+            "counter_facts": payload["answer_synthesis"].get("counter_facts", []),
+            "followups": payload["answer_synthesis"].get("followups", []),
         }
 
     # Optionally include narrative if present
