@@ -19,21 +19,19 @@ from datetime import datetime
 
 import logging
 import requests
+import os
 
-logging.basicConfig(level=logging.INFO)
+# 🎯 Optimization: Reduce log output in production
+LOG_LEVEL = os.getenv("LOG_LEVEL", "WARNING").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.WARNING))
 
 import time
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from driftcoach.core.state import State
 from driftcoach.core.action import Action
-from driftcoach.ml.outcome_model import OutcomeModel
-from driftcoach.ml.state_similarity import StateSimilarity
-from driftcoach.outputs.what_if import generate_what_if_analysis
-from driftcoach.narrative.what_if_narrative import render_what_if_narrative
 from driftcoach.main import build_registry, load_actions, _build_outputs
 from driftcoach.analysis.trigger import is_eligible
 from driftcoach.adapters.grid.client import GridClient
@@ -68,17 +66,13 @@ from driftcoach.llm.orchestrator import generate_inference_plan
 from driftcoach.llm.mining_plan_generator import generate_mining_plan
 from driftcoach.session import session_analysis_store, build_analysis_node_from_agg, build_snapshot_from_stats_results
 from driftcoach.analysis.answer_synthesizer import AnswerInput, AnswerSynthesisResult, synthesize_answer, render_answer
+from driftcoach.analysis.decision_mapper import DecisionMapper
 from driftcoach.session.analysis_store import SessionAnalysisStore
 from driftcoach.hackathon.series_pipeline import hackathon_mine_and_analyze
+from driftcoach.narrative import synthesize_narrative, NarrativeType
 from driftcoach.narrative.orchestration import run_narrative_orchestration
-from driftcoach.narrative.findings_narrative import render_narrative_from_findings
-from driftcoach.analysis.scope_reducer import reduce_scope
-from driftcoach.analysis.derived_finding_builder import (
-    build_findings_from_facts,
-    evaluate_question,
-    reuse_findings_from_pool,
-)
-from driftcoach.question_state import QuestionState, SessionQAState
+from driftcoach.memory.store import MemoryStore, DerivedFinding, QueryRecord
+from driftcoach.config.bounds import DEFAULT_BOUNDS
 
 
 logger = logging.getLogger(__name__)
@@ -101,22 +95,6 @@ DEMO_QUERY_LIMIT = int(os.getenv("DEMO_QUERY_LIMIT", "8"))
 
 app = FastAPI()
 
-
-@app.exception_handler(Exception)
-async def safe_fallback(request: Request, exc: Exception):
-    logger.warning("global_exception_fallback", exc_info=exc)
-    return JSONResponse(
-        status_code=200,
-        content={
-            "intent": "unknown",
-            "narrative": {
-                "type": "ERROR_FALLBACK",
-                "confidence": 0.1,
-                "content": "系统已生成复盘结果，但内容过多，已启用安全模式。",
-            },
-        },
-    )
-
 # CORS: allow frontend dev server
 app.add_middleware(
     CORSMiddleware,
@@ -126,10 +104,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add exception handler for Pydantic validation errors
+from pydantic import ValidationError
+from fastapi.requests import Request
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(ValidationError)
+async def validation_exception_handler(request: Request, exc: ValidationError):
+    logger.error("[VALIDATION] Request validation failed: %s", exc.errors())
+    return JSONResponse(
+        status_code=400,
+        content={
+            "detail": "Request validation failed",
+            "errors": exc.errors(),
+            "body": exc.body if hasattr(exc, 'body') else None
+        },
+    )
+
 _conversation_store: Dict[str, Dict[str, Any]] = {}
 _session_store: Dict[str, Dict[str, Any]] = {}
 _demo_query_store: Dict[str, int] = {}
-_qa_store: Dict[str, SessionQAState] = {}
+
+# Memory store for findings, gate decisions, and queries
+_memory_store = MemoryStore(db_path="driftcoach_memory.db")
 
 
 def _rate_limit_guard() -> None:
@@ -147,51 +144,6 @@ def load_demo_payload() -> Dict[str, Any]:
         return json.load(f)
 
 
-def _truncate_text(text: Any, max_chars: int = 8000) -> str:
-    if text is None:
-        return ""
-    if not isinstance(text, str):
-        try:
-            text = json.dumps(text, ensure_ascii=False)
-        except Exception:
-            text = str(text)
-    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
-
-
-def _deduce_intent(coach_query: str, hinted: Optional[str]) -> str:
-    if hinted:
-        return hinted
-    if "经济" in coach_query or "eco" in coach_query.lower():
-        return "ECONOMIC_ISSUE"
-    if "教训" in coach_query or "总结" in coach_query:
-        return "SUMMARY"
-    if "地图" in coach_query or "薄弱" in coach_query:
-        return "MATCH_REVIEW"
-    if "议程" in coach_query or "复盘" in coach_query:
-        return "MATCH_REVIEW"
-    if "选手" in coach_query or "阵亡" in coach_query:
-        return "PLAYER_REVIEW"
-    return hinted or "MATCH_REVIEW"
-
-
-def _scope_from_intent(intent: str) -> str:
-    mapping = {
-        "ECONOMIC_ISSUE": "ECON",
-        "MATCH_REVIEW": "MAP",
-        "PLAYER_REVIEW": "PLAYER",
-        "COUNTERFACTUAL_PLAYER_IMPACT": "PLAYER",
-        "MATCH_SUMMARY": "SUMMARY",
-        "SUMMARY": "SUMMARY",
-    }
-    return mapping.get(intent, "MAP")
-
-
-def _ensure_session_qa(session_id: str) -> SessionQAState:
-    if session_id not in _qa_store:
-        _qa_store[session_id] = SessionQAState(session_id=session_id)
-    return _qa_store[session_id]
-
-
 class CoachQuery(BaseModel):
     coach_query: str
     mode: Optional[str] = None
@@ -206,12 +158,6 @@ class CoachQuery(BaseModel):
 class CoachInit(BaseModel):
     grid_series_id: str
     grid_player_id: Optional[str] = None
-
-
-class WhatIfRequest(BaseModel):
-    state: Dict[str, Any]
-    history: Optional[List[Dict[str, Any]]] = None
-    alternatives: Optional[List[str]] = None
 
 
 def _allow_stats_fallback(data_source: str) -> bool:
@@ -234,49 +180,6 @@ def _build_player_seeds(grid_player_id: Optional[str], data_source: str) -> List
     if grid_player_id and grid_player_id not in seeds:
         seeds.append(grid_player_id)
     return seeds
-
-
-def _parse_state(payload: Dict[str, Any]) -> State:
-    try:
-        return State.from_dict(payload)
-    except Exception as exc:  # pragma: no cover - defensive
-        raise HTTPException(status_code=400, detail=f"invalid state payload: {exc}")
-
-
-def _fit_outcome_model(history_states: List[State]) -> OutcomeModel:
-    model = OutcomeModel()
-    train_states: List[State] = []
-    train_actions: List[Action] = []
-    train_outcomes: List[int] = []
-    for s in history_states:
-        act_raw = s.extras.get("action") if hasattr(s, "extras") else None
-        outcome_raw = s.extras.get("round_result") if hasattr(s, "extras") else None
-        if not act_raw or outcome_raw not in {"WIN", "LOSS"}:
-            continue
-        try:
-            act = Action(act_raw)
-        except Exception:
-            continue
-        train_states.append(s)
-        train_actions.append(act)
-        train_outcomes.append(1 if outcome_raw == "WIN" else 0)
-    if train_states and len(set(train_outcomes)) > 1:
-        try:
-            model.fit(train_states, train_actions, train_outcomes)
-        except Exception:
-            pass
-    return model
-
-
-def _build_similarity(history_states: List[State]) -> Optional[StateSimilarity]:
-    if not history_states:
-        return None
-    try:
-        sim = StateSimilarity(n_components=4, n_neighbors=min(10, len(history_states)))
-        sim.fit(history_states)
-        return sim
-    except Exception:
-        return None
 
 
 def _stats_confidence_tier(stats_results: List[Dict[str, Any]], aggregated_pack: Optional[Dict[str, Any]]) -> Tuple[str, str]:
@@ -2320,7 +2223,6 @@ def coach_init(body: CoachInit):
         "grid_player_id": grid_player_id,
         "grid_series_id": grid_series_id,
     }
-    _qa_store[session_id] = SessionQAState(session_id=session_id)
     if DEMO_MODE:
         remaining = max(0, DEMO_QUERY_LIMIT)
         _demo_query_store[session_id] = remaining
@@ -2349,54 +2251,16 @@ def coach_init(body: CoachInit):
     return {"status": "READY", "context_loaded": True, "session_id": session_id, "context": context}
 
 
-@app.post("/what-if")
-async def analyze_what_if(request: WhatIfRequest):
-    """Counterfactual analysis: compare actions under current state."""
-
-    current_state = _parse_state(request.state)
-    history_states = [State.from_dict(s) for s in (request.history or [])]
-
-    outcome_model = _fit_outcome_model(history_states)
-    similarity = _build_similarity(history_states)
-
-    alternatives: List[Action] = []
-    for a in request.alternatives or []:
-        try:
-            alternatives.append(Action(a))
-        except Exception:
-            continue
-    if not alternatives:
-        alternatives = [Action.CONTEST, Action.SAVE]
-
-    outcome = generate_what_if_analysis(
-        current_state=current_state,
-        alternative_actions=alternatives,
-        model=outcome_model,
-        similarity_finder=similarity,
-    )
-
-    narrative = render_what_if_narrative(outcome)
-
-    serialized_outcomes: Dict[str, Any] = {
-        act.value: payload for act, payload in outcome.outcomes.items()
-    }
-
-    return {
-        "outcome": {
-            "state": getattr(outcome.state, "state_id", outcome.state),
-            "actions": [a.value for a in outcome.actions],
-            "outcomes": serialized_outcomes,
-            "confidence": outcome.confidence,
-        },
-        "narrative": narrative,
-    }
-
-
 @app.post("/api/coach/query")
 def coach_query(body: CoachQuery):
     _rate_limit_guard()
 
+    # Detailed logging for debugging
+    logger.info("[QUERY] Received request: session_id=%s, coach_query=%s",
+                body.session_id, body.coach_query[:50] if body.coach_query else None)
+
     if not body.coach_query:
+        logger.warning("[QUERY] Missing coach_query in request")
         raise HTTPException(status_code=400, detail="coach_query is required")
 
     mode = (body.mode or "").lower()
@@ -2411,7 +2275,12 @@ def coach_query(body: CoachQuery):
     hackathon_snapshot = None
     if DATA_SOURCE == "grid":
         if not session_id or session_id not in _session_store:
-            raise HTTPException(status_code=400, detail="Context not initialized. Call /coach/init first.")
+            logger.warning("[QUERY] Session not found: session_id=%s, available_sessions=%s",
+                         session_id, list(_session_store.keys())[:5])
+            raise HTTPException(
+                status_code=400,
+                detail=f"Context not initialized. Call /coach/init first. (session_id: {session_id})"
+            )
         session = _session_store[session_id]
         if DEMO_MODE:
             remaining = _demo_query_store.get(session_id, DEMO_QUERY_LIMIT)
@@ -2531,7 +2400,70 @@ def coach_query(body: CoachQuery):
                 facts=facts_by_type,
                 series_id=grid_series_id_local,
             )
-            ans_result = synthesize_answer(ans_input)
+
+            # ✅ 1→2 Breakthrough: Use DecisionMapper for degraded decisions
+            # Build context for decision mapper
+            context_for_decision = {
+                "schema": context_meta.get("hackathon_evidence", [{}])[0].get("schema") or {},
+                "evidence": {
+                    "states_count": len(file_facts),
+                    "seriesPool": context_meta.get("hackathon_evidence", [{}])[0].get("seriesPool", 0)
+                }
+            }
+
+            # Use DecisionMapper to generate decision (supports DEGRADED path)
+            mapper = DecisionMapper()
+            decision = mapper.map_to_decision(
+                context=context_for_decision,
+                intent=ans_input.intent,
+                facts=facts_by_type,
+                bounds=DEFAULT_BOUNDS
+            )
+
+            # Convert CoachingDecision to AnswerSynthesisResult
+            ans_result = AnswerSynthesisResult(
+                claim=decision.claim,
+                verdict=decision.verdict,
+                confidence=decision.confidence,
+                support_facts=decision.support_facts,
+                counter_facts=decision.counter_facts,
+                followups=decision.followups
+            )
+
+            # Store query and findings in memory
+            if session_id:
+                # Extract findings from facts
+                finding_ids = []
+                for fact_type, fact_list in facts_by_type.items():
+                    for fact in fact_list[:DEFAULT_BOUNDS.max_findings_per_intent]:
+                        finding = DerivedFinding(
+                            finding_id=MemoryStore.generate_id(),
+                            session_id=session_id,
+                            intent=mining_plan.get("intent") or "UNKNOWN",
+                            fact_type=fact_type,
+                            content=fact,
+                            confidence=fact.get("confidence", 0.7),
+                            created_at=MemoryStore.now(),
+                            series_id=grid_series_id_local,
+                            player_id=player_focus,
+                            metadata={"source": "hackathon_query"},
+                        )
+                        if _memory_store.store_finding(finding):
+                            finding_ids.append(finding.finding_id)
+
+                # Store query record
+                query_record = QueryRecord(
+                    query_id=MemoryStore.generate_id(),
+                    session_id=session_id,
+                    query_text=body.coach_query,
+                    intent=mining_plan.get("intent") or "UNKNOWN",
+                    findings_ids=finding_ids,
+                    created_at=MemoryStore.now(),
+                    series_id=grid_series_id_local,
+                    player_id=player_focus,
+                )
+                _memory_store.store_query(query_record)
+
         context_meta["answer_synthesis"] = asdict(ans_result)
 
         # Narrative orchestration: auto-run composite intents to harvest facts
@@ -2544,6 +2476,7 @@ def coach_query(body: CoachQuery):
                 body.coach_query,
                 player_id=player_focus,
                 player_name=player_name,
+                bounds=DEFAULT_BOUNDS,  # Apply hard bounds
             )
             if extra_evidence:
                 file_facts_extra = [e for e in extra_evidence if e.get("type") == "FILE_FACT"]
@@ -2720,46 +2653,76 @@ def coach_query(body: CoachQuery):
     payload["context"]["aggregated_performance"] = aggregated_pack
     payload["context"]["aggregated_gaps"] = aggregated_gaps
 
-    # Narrative synthesis based on DerivedFindings only
+    # Narrative synthesis (parallel to AnswerSynthesis)
     try:
-        intent_label = _deduce_intent(body.coach_query, inference_plan.get("intent") or (mining_plan_ctx or {}).get("intent"))
-        scope_label = _scope_from_intent(intent_label)
-        session_key = session_id or "demo"
-        qa_state = _ensure_session_qa(session_key)
+        intent_label = inference_plan.get("intent") or (mining_plan_ctx or {}).get("intent") or ""
+        narrative_type = None
+        if intent_label == "MATCH_REVIEW":
+            narrative_type = NarrativeType.MATCH_REVIEW_AGENDA
+        elif intent_label == "PLAYER_REVIEW":
+            narrative_type = NarrativeType.PLAYER_INSIGHT_REPORT
+        elif intent_label == "COUNTERFACTUAL_PLAYER_IMPACT":
+            narrative_type = NarrativeType.PLAYER_INSIGHT_REPORT
+        elif intent_label == "MATCH_SUMMARY":
+            narrative_type = NarrativeType.SUMMARY_REPORT
 
-        available_facts = context_meta.get("file_facts") or []
-        question_state = QuestionState.new(
-            body.coach_query,
-            intent=intent_label,
-            scope=scope_label,
-            required_fact_types=(mining_plan_ctx or {}).get("required_facts") or [],
-            available_facts=available_facts,
-        )
+        if narrative_type:
+            facts_for_narrative = context_meta.get("file_facts") or []
+            scope = {
+                "series_id": payload.get("context", {}).get("grid_series_id") or grid_series_id_local,
+                "player_id": payload.get("context", {}).get("grid_player_id") or grid_player_id_local,
+                "player_name": (context_meta.get("meta", {}) or {}).get("last_player_name") or (payload.get("context", {}) or {}).get("player"),
+                "map": (payload.get("context", {}) or {}).get("map"),
+                "match_format": (payload.get("context", {}) or {}).get("match_format") or "bo?",
+                "opponent": (payload.get("context", {}) or {}).get("opponent"),
+            }
 
-        filtered_facts, filtered_findings = reduce_scope(question_state, qa_state)
+            # PLAYER_REVIEW 选手缺失兜底
+            skip_synthesis = False
+            if intent_label == "PLAYER_REVIEW":
+                player_facts = [
+                    f
+                    for f in facts_for_narrative
+                    if f.get("fact_type") == "PLAYER_IMPACT_STAT"
+                    or (f.get("scope", {}) or {}).get("player_id") == scope.get("player_id")
+                    or (f.get("scope", {}) or {}).get("player_name") == scope.get("player_name")
+                ]
+                if len(player_facts) == 0:
+                    payload["narrative"] = {
+                        "type": NarrativeType.PLAYER_INSIGHT_REPORT.value,
+                        "confidence": 0.3,
+                        "content": (
+                            "未找到该选手在本场比赛的有效数据。\n"
+                            "【事实】当前缺少与该选手相关的回合与聚合样本。\n"
+                            "【影响】无法评估其对局表现，结论保持占位。\n"
+                            "【建议】补充选手标注或指定队伍/地图后再复盘。"
+                        ),
+                    }
+                    payload.setdefault("context", {}).setdefault("meta", {})["narrative_used_facts"] = 0
+                    skip_synthesis = True
 
-        findings_for_question = []
-        if intent_label == "SUMMARY" or scope_label == "SUMMARY":
-            findings_for_question = reuse_findings_from_pool(question_state, filtered_findings)
-        else:
-            findings_for_question = build_findings_from_facts(question_state, filtered_facts)
-            qa_state.findings_pool.extend(findings_for_question)
+            if intent_label == "COUNTERFACTUAL_PLAYER_IMPACT":
+                payload["narrative"] = {
+                    "type": NarrativeType.PLAYER_INSIGHT_REPORT.value,
+                    "confidence": 0.35,
+                    "content": (
+                        "假设该选手在前期阵亡的占位推演（低置信）：\n"
+                        "【事实】当前缺少直接样本，基于常见模式推断。\n"
+                        "【影响】前期控图与信息链会削弱，经济更易断档。\n"
+                        "【建议】准备替代首发与暂停策略，必要时选择保枪稳节奏。"
+                    ),
+                }
+                payload.setdefault("context", {}).setdefault("meta", {})["narrative_used_facts"] = 0
+                skip_synthesis = True
 
-        status, conf = evaluate_question(findings_for_question)
-        question_state.derived_findings = findings_for_question
-        question_state.status = status
-        question_state.confidence = conf
-        qa_state.questions.append(question_state)
-
-        narrative_content, narrative_conf = render_narrative_from_findings(question_state, findings_for_question)
-        payload["narrative"] = {
-            "type": f"FINDINGS_{intent_label}",
-            "confidence": narrative_conf,
-            "content": narrative_content,
-        }
-        payload.setdefault("context", {}).setdefault("meta", {})["narrative_used_facts"] = len(findings_for_question)
-        payload.setdefault("qa", {})["questions"] = [q.to_dict() for q in qa_state.questions]
-        payload["qa"]["findings_pool"] = [f.to_dict() for f in qa_state.findings_pool]
+            if not skip_synthesis:
+                narrative_result = synthesize_narrative(narrative_type, facts_for_narrative, scope)
+                payload["narrative"] = {
+                    "type": narrative_result.narrative_type.value,
+                    "content": narrative_result.content,
+                    "confidence": narrative_result.confidence,
+                }
+                payload.setdefault("context", {}).setdefault("meta", {})["narrative_used_facts"] = narrative_result.used_facts
     except Exception as exc:  # pragma: no cover
         logger.warning("narrative_synthesis_failed", exc_info=exc)
 
@@ -2777,7 +2740,15 @@ def coach_query(body: CoachQuery):
     payload["patch_results"] = patch_results
     payload["stats_results"] = stats_results
 
-    if inference_plan.get("rationale"):
+    # ✅ 1→2 Breakthrough: Prioritize DecisionMapper result over old gate rationale
+    # If DecisionMapper has generated a result, use it instead of inference_plan rationale
+    answer_synthesis = context_meta.get("answer_synthesis", {})
+    if answer_synthesis.get("claim") and answer_synthesis.get("verdict") != "INSUFFICIENT":
+        # DecisionMapper provided a valid answer (DEGRADED or STANDARD)
+        # Use its claim instead of the old gate's "证据不足"
+        payload["assistant_message"] = answer_synthesis.get("claim")
+    elif inference_plan.get("rationale"):
+        # Fallback to old gate logic
         payload["assistant_message"] = inference_plan.get("rationale")
 
     logger.info(
@@ -2812,6 +2783,12 @@ def coach_query(body: CoachQuery):
                 + payload["assistant_message"]
             )
 
+    # ✅ Optimization: Strip debug info to reduce payload size
+    # This reduces response from ~100MB to ~10KB
+    verbose = os.getenv("VERBOSE_RESPONSE", "false").lower() == "true"
+    if not verbose:
+        payload = _strip_debug_info(payload)
+
     payload = _ensure_messages(
         payload,
         body.coach_query,
@@ -2820,32 +2797,7 @@ def coach_query(body: CoachQuery):
         inference_plan,
     )
 
-    # -------- Response whitelist & truncation --------
-    intent_label = _deduce_intent(body.coach_query, (inference_plan or {}).get("intent") or (mining_plan_ctx or {}).get("intent") or payload.get("intent"))
-    narrative_obj = payload.get("narrative") or {}
-    narrative_content = _truncate_text(narrative_obj.get("content"), 8000)
-    fact_counts: Dict[str, int] = {}
-    by_type = payload.get("context", {}).get("evidence", {}).get("byType") or {}
-    if isinstance(by_type, dict):
-        for k, v in by_type.items():
-            if isinstance(v, (int, float)):
-                fact_counts[str(k)] = int(v)
-    used_facts = payload.get("context", {}).get("meta", {}).get("narrative_used_facts") or 0
-
-    sanitized = {
-        "intent": intent_label,
-        "narrative": {
-            "type": narrative_obj.get("type"),
-            "confidence": narrative_obj.get("confidence"),
-            "content": narrative_content,
-        },
-        "fact_usage": {
-            "used": int(used_facts) if isinstance(used_facts, (int, float)) else 0,
-            "by_type": fact_counts,
-        },
-    }
-
-    return sanitized
+    return payload
 
 
 @app.get("/api/demo")
@@ -2870,6 +2822,56 @@ def get_demo() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Failed to load demo payload") from exc
 
 
+@app.get("/api/coach/memory")
+def get_memory(
+    session_id: Optional[str] = None,
+    intent: Optional[str] = None,
+    limit: int = 10,
+) -> Dict[str, Any]:
+    """
+    Retrieve historical memory (findings, queries, gate stats).
+
+    Query params:
+    - session_id: Filter by session
+    - intent: Filter by intent type
+    - limit: Max results to return (default 10)
+    """
+    try:
+        # Get findings
+        if session_id:
+            findings = _memory_store.get_findings_by_session(session_id)
+        elif intent:
+            findings = _memory_store.get_findings_by_intent(intent, limit=limit)
+        else:
+            # Return recent findings from any session
+            findings = _memory_store.get_findings_by_intent("", limit=limit)
+
+        # Get gate decision stats
+        stats = _memory_store.get_gate_decision_stats(intent=intent)
+
+        return {
+            "status": "ok",
+            "findings": [
+                {
+                    "finding_id": f.finding_id,
+                    "session_id": f.session_id,
+                    "intent": f.intent,
+                    "fact_type": f.fact_type,
+                    "confidence": f.confidence,
+                    "created_at": f.created_at,
+                    "series_id": f.series_id,
+                    "content": f.content,
+                }
+                for f in findings[:limit]
+            ],
+            "gate_stats": stats,
+            "count": len(findings),
+        }
+    except Exception as exc:
+        logger.error("[MEMORY] Failed to retrieve memory", exc_info=exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
     return {
@@ -2877,7 +2879,55 @@ def health() -> Dict[str, Any]:
         "data_source": DATA_SOURCE,
         "demo_mode": DEMO_MODE,
         "demo_series_id": DEMO_SERIES_ID,
+        "memory_enabled": True,
+        "bounds_enforced": True,
+        "active_sessions": list(_session_store.keys())[:10],  # Show first 10 session IDs
     }
+
+
+def _strip_debug_info(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Remove debug information from payload to reduce response size.
+
+    Reduces response from ~100MB to ~10KB by removing:
+    - Full evidence details
+    - Verbose context information
+    - Inference plan details
+    - Patch results
+
+    Can be disabled by setting VERBOSE_RESPONSE=true env variable.
+    """
+    # Keep only essential fields
+    stripped = {
+        "assistant_message": payload.get("assistant_message"),
+    }
+
+    # Optionally include answer_synthesis if present
+    if payload.get("answer_synthesis"):
+        stripped["answer_synthesis"] = {
+            "claim": payload["answer_synthesis"].get("claim"),
+            "verdict": payload["answer_synthesis"].get("verdict"),
+            "confidence": payload["answer_synthesis"].get("confidence"),
+        }
+
+    # Optionally include narrative if present
+    if payload.get("narrative"):
+        stripped["narrative"] = {
+            "type": payload["narrative"].get("type"),
+            "content": payload["narrative"].get("content"),
+            "confidence": payload["narrative"].get("confidence"),
+        }
+
+    # Add minimal context meta (without full details)
+    if payload.get("context", {}).get("meta"):
+        stripped["context"] = {
+            "meta": {
+                "states": payload["context"]["meta"].get("states", 0),
+                "seriesPool": payload["context"]["meta"].get("seriesPool", 0),
+            }
+        }
+
+    return stripped
 
 
 if __name__ == "__main__":

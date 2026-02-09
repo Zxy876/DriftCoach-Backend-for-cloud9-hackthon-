@@ -3,6 +3,12 @@ from __future__ import annotations
 from typing import Dict, List, Any, Optional, Tuple
 
 from driftcoach.hackathon.series_pipeline import hackathon_mine_and_analyze
+from driftcoach.config.bounds import (
+    SystemBounds,
+    DEFAULT_BOUNDS,
+    enforce_bounds_on_intents,
+    BoundEnforcer,
+)
 
 MATCH_REVIEW_ORCHESTRATION: Dict[str, Any] = {
     "required_intents": [
@@ -75,6 +81,7 @@ def run_narrative_orchestration(
     base_query: str,
     player_id: Optional[str] = None,
     player_name: Optional[str] = None,
+    bounds: SystemBounds = DEFAULT_BOUNDS,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     plan_cfg = ORCHESTRATION_MAP.get(intent)
     if not plan_cfg:
@@ -83,20 +90,27 @@ def run_narrative_orchestration(
     aggregated_evidence: List[Dict[str, Any]] = []
     aggregated_nodes: List[Dict[str, Any]] = []
 
+    # Enforce max_sub_intents bound
     required_intents = plan_cfg.get("required_intents") or []
-    for sub_intent in required_intents:
-        mining_plan = _build_mining_plan(sub_intent, series_id, player_id, player_name)
-        sub_query = f"[auto-narrative:{intent}->{sub_intent}] {base_query}"
-        plan, evidence, nodes, resolution = hackathon_mine_and_analyze(
-            api_key,
-            series_id,
-            sub_query,
-            player_focus=player_id,
-            player_name=player_name,
-            mining_plan=mining_plan,
-            should_force_fd=True,
-        )
-        aggregated_evidence.extend(evidence or [])
-        aggregated_nodes.extend(nodes or [])
+    bounded_intents = enforce_bounds_on_intents(required_intents, bounds=bounds)
+
+    # Use bound enforcer to track compliance
+    with BoundEnforcer(bounds=bounds) as enforcer:
+        enforcer.check_sub_intent_count(len(bounded_intents))
+
+        for sub_intent in bounded_intents:
+            mining_plan = _build_mining_plan(sub_intent, series_id, player_id, player_name)
+            sub_query = f"[auto-narrative:{intent}->{sub_intent}] {base_query}"
+            plan, evidence, nodes, resolution = hackathon_mine_and_analyze(
+                api_key,
+                series_id,
+                sub_query,
+                player_focus=player_id,
+                player_name=player_name,
+                mining_plan=mining_plan,
+                should_force_fd=True,
+            )
+            aggregated_evidence.extend(evidence or [])
+            aggregated_nodes.extend(nodes or [])
 
     return aggregated_evidence, aggregated_nodes

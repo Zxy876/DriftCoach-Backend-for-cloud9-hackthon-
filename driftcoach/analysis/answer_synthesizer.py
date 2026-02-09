@@ -3,6 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Any
 
+from driftcoach.config.bounds import (
+    SystemBounds,
+    DEFAULT_BOUNDS,
+    enforce_bounds_on_facts,
+    calculate_finding_quota,
+)
+
 
 @dataclass
 class AnswerInput:
@@ -33,11 +40,65 @@ def _fmt_fact(fact: Dict[str, Any]) -> str:
     return " | ".join(pieces) or fact.get("fact_type") or "fact"
 
 
-def _support_strings(facts: List[Dict[str, Any]], limit: int = 3) -> List[str]:
+def _support_strings(
+    facts: List[Dict[str, Any]],
+    limit: int = None,
+    bounds: SystemBounds = DEFAULT_BOUNDS,
+) -> List[str]:
+    """
+    Format facts into support strings, respecting hard bounds.
+
+    Args:
+        facts: List of fact dictionaries
+        limit: Optional explicit limit (overrides bounds if provided)
+        bounds: System bounds to enforce
+
+    Returns:
+        List of formatted fact strings
+    """
+    if limit is None:
+        limit = bounds.max_support_facts
     out: List[str] = []
     for f in facts[:limit]:
         out.append(_fmt_fact(f))
     return out
+
+
+def _counter_strings(
+    facts: List[Dict[str, Any]],
+    limit: int = None,
+    bounds: SystemBounds = DEFAULT_BOUNDS,
+) -> List[str]:
+    """
+    Format counter-fact strings, respecting hard bounds.
+
+    Args:
+        facts: List of counter-fact dictionaries (or string messages)
+        limit: Optional explicit limit (overrides bounds if provided)
+        bounds: System bounds to enforce
+
+    Returns:
+        List of formatted counter-fact strings
+    """
+    if limit is None:
+        limit = bounds.max_counter_facts
+
+    # Handle both dict facts and string messages
+    out: List[str] = []
+    for f in facts[:limit]:
+        if isinstance(f, dict):
+            out.append(_fmt_fact(f))
+        else:
+            out.append(str(f))
+    return out
+
+
+def _limit_followups(
+    followups: List[str],
+    bounds: SystemBounds = DEFAULT_BOUNDS,
+) -> List[str]:
+    """Limit follow-up questions to max_followup_questions bound."""
+    return (followups or [])[:bounds.max_followup_questions]
 
 
 def _swings_across_segments(swings: List[Dict[str, Any]]) -> bool:
@@ -70,7 +131,10 @@ def _swing_changes_winner(fact: Dict[str, Any]) -> bool:
     return False
 
 
-def synthesize_answer(inp: AnswerInput) -> AnswerSynthesisResult:
+def synthesize_answer(
+    inp: AnswerInput,
+    bounds: SystemBounds = DEFAULT_BOUNDS,
+) -> AnswerSynthesisResult:
     intent = (inp.intent or "").upper()
     facts = inp.facts or {}
 
@@ -92,12 +156,12 @@ def synthesize_answer(inp: AnswerInput) -> AnswerSynthesisResult:
             verdict = "YES"
             claim = "这是一场高风险对局"
             confidence = 0.9
-            support = _support_strings(hrs) or _support_strings(swings)
+            support = _support_strings(hrs, bounds=bounds) or _support_strings(swings, bounds=bounds)
         elif len(swings) >= 5:
             verdict = "YES"
             claim = "这是一场高风险对局"
             confidence = 0.75
-            support = _support_strings(swings)
+            support = _support_strings(swings, bounds=bounds)
         else:
             verdict = "INSUFFICIENT"
             claim = "现有证据不足以判定为高风险对局"
@@ -114,13 +178,14 @@ def synthesize_answer(inp: AnswerInput) -> AnswerSynthesisResult:
             verdict = "YES"
             claim = "强起决策很可能放大了风险，保枪可能更优"
             confidence = 0.82
-            support = _support_strings(force_buy) + _support_strings(eco_collapse)
+            # Enforce max_findings_per_intent: limit to 2 total
+            support = _support_strings(force_buy, limit=1, bounds=bounds) + _support_strings(eco_collapse, limit=1, bounds=bounds)
         elif len(full_buy) > len(force_buy):
             verdict = "NO"
             claim = "即使保枪，结果也未必会更好"
             confidence = 0.55
-            support = _support_strings(full_buy)
-            counter = _support_strings(force_buy)
+            support = _support_strings(full_buy, bounds=bounds)
+            counter = _support_strings(force_buy, bounds=bounds)
         else:
             verdict = "INSUFFICIENT"
             claim = "无法仅凭当前经济事件判断"
@@ -136,7 +201,7 @@ def synthesize_answer(inp: AnswerInput) -> AnswerSynthesisResult:
             verdict = "YES"
             claim = "比赛中出现过关键的局势反转"
             confidence = 0.78
-            support = _support_strings(swings)
+            support = _support_strings(swings, bounds=bounds)
         else:
             verdict = "NO"
             claim = "未发现能改变局势的反转"
@@ -152,12 +217,12 @@ def synthesize_answer(inp: AnswerInput) -> AnswerSynthesisResult:
             verdict = "YES"
             claim = "局势反转在多局段反复出现"
             confidence = 0.76
-            support = _support_strings(swings)
+            support = _support_strings(swings, bounds=bounds)
         else:
             verdict = "NO"
             claim = "局势反转更像偶发事件"
             confidence = 0.52 if swings else 0.4
-            support = _support_strings(swings)
+            support = _support_strings(swings, bounds=bounds)
             if not swings:
                 counter = ["未提炼到 ROUND_SWING"]
             else:
@@ -172,13 +237,13 @@ def synthesize_answer(inp: AnswerInput) -> AnswerSynthesisResult:
             verdict = "YES"
             claim = "出现过经济崩盘/断档的起点，需要控制经济节奏"
             confidence = 0.78
-            support = _support_strings(eco)
-            counter = _support_strings(swings)
+            support = _support_strings(eco, bounds=bounds)
+            counter = _support_strings(swings, bounds=bounds)
         elif swings:
             verdict = "INSUFFICIENT"
             claim = "有局势波动，但尚不足以定位经济崩盘起点"
             confidence = 0.45
-            support = _support_strings(swings)
+            support = _support_strings(swings, bounds=bounds)
             followups = ["补充经济明细（loadout/money）以定位崩盘回合"]
         else:
             verdict = "INSUFFICIENT"
@@ -196,12 +261,13 @@ def synthesize_answer(inp: AnswerInput) -> AnswerSynthesisResult:
             verdict = "YES"
             claim = "不同阶段的局势波动差异明显"
             confidence = 0.7
-            support = _support_strings(swings) + _support_strings(hrs)
+            # Enforce max_findings_per_intent
+            support = _support_strings(swings, limit=1, bounds=bounds) + _support_strings(hrs, limit=1, bounds=bounds)
         elif swings:
             verdict = "INSUFFICIENT"
             claim = "有波动但未见明显阶段差异"
             confidence = 0.45
-            support = _support_strings(swings)
+            support = _support_strings(swings, bounds=bounds)
             followups = ["按上/下半场拆分 swing 事件", "补充更多局段样本"]
         else:
             verdict = "INSUFFICIENT"
@@ -218,13 +284,13 @@ def synthesize_answer(inp: AnswerInput) -> AnswerSynthesisResult:
             verdict = "YES"
             claim = "存在关键战术起买决策，需复盘其收益/风险"
             confidence = 0.7
-            support = _support_strings(force_buy)
-            counter = _support_strings(swings)
+            support = _support_strings(force_buy, bounds=bounds)
+            counter = _support_strings(swings, bounds=bounds)
         elif full_buy:
             verdict = "NO"
             claim = "以常规满购买为主，未见异常战术决策"
             confidence = 0.5
-            support = _support_strings(full_buy)
+            support = _support_strings(full_buy, bounds=bounds)
         else:
             verdict = "INSUFFICIENT"
             claim = "缺少可评估的战术决策事件"
@@ -240,13 +306,13 @@ def synthesize_answer(inp: AnswerInput) -> AnswerSynthesisResult:
             verdict = "YES"
             claim = "战略意图可能未被执行到位（连续目标失守）"
             confidence = 0.72
-            support = _support_strings(obj_loss)
-            counter = _support_strings(swings)
+            support = _support_strings(obj_loss, bounds=bounds)
+            counter = _support_strings(swings, bounds=bounds)
         elif len(swings) >= 2:
             verdict = "INSUFFICIENT"
             claim = "有局势波动，但缺少目标层面的失守证据"
             confidence = 0.45
-            support = _support_strings(swings)
+            support = _support_strings(swings, bounds=bounds)
             followups = ["补充目标/据点失守的记录"]
         else:
             verdict = "INSUFFICIENT"
@@ -262,7 +328,8 @@ def synthesize_answer(inp: AnswerInput) -> AnswerSynthesisResult:
             verdict = "YES"
             claim = "存在可疑的地图薄弱点/失守区域"
             confidence = 0.65
-            support = _support_strings(hrs) + _support_strings(obj_loss)
+            # Enforce max_findings_per_intent
+            support = _support_strings(hrs, limit=1, bounds=bounds) + _support_strings(obj_loss, limit=1, bounds=bounds)
         else:
             verdict = "INSUFFICIENT"
             claim = "未找到明确的地图薄弱点"
@@ -278,13 +345,13 @@ def synthesize_answer(inp: AnswerInput) -> AnswerSynthesisResult:
             verdict = "YES"
             claim = "关键回合拆解可揭示局势转折点"
             confidence = 0.66
-            support = _support_strings(swings)
-            counter = _support_strings(force_buy)
+            support = _support_strings(swings, bounds=bounds)
+            counter = _support_strings(force_buy, bounds=bounds)
         elif force_buy:
             verdict = "INSUFFICIENT"
             claim = "有战术起买，但缺少回合势头波动信息"
             confidence = 0.4
-            support = _support_strings(force_buy)
+            support = _support_strings(force_buy, bounds=bounds)
             followups = ["补充 swing/关键击杀事件"]
         else:
             verdict = "INSUFFICIENT"
@@ -297,6 +364,11 @@ def synthesize_answer(inp: AnswerInput) -> AnswerSynthesisResult:
         verdict = "INSUFFICIENT"
         confidence = 0.2
         followups = ["补充意图映射或规则"]
+
+    # Enforce global bounds on outputs
+    support = support[:bounds.max_support_facts]
+    counter = counter[:bounds.max_counter_facts]
+    followups = _limit_followups(followups, bounds=bounds)
 
     return AnswerSynthesisResult(
         claim=claim,
