@@ -127,8 +127,25 @@ class RiskAssessmentHandler(IntentHandler):
         return intent == "RISK_ASSESSMENT"
 
     def process(self, ctx: HandlerContext) -> AnswerSynthesisResult:
-        hrs = ctx.get_facts("HIGH_RISK_SEQUENCE")
-        swings = ctx.get_facts("ROUND_SWING")
+        # ✅ Phase 2: Spec 收缩可见性
+        # 只使用 RISK_SPEC 允许的 facts
+        from driftcoach.specs.spec_schema import SpecRecognizer, RISK_SPEC
+
+        # 获取所有 facts（按类型分组）
+        all_facts_by_type = {}
+        for fact_type in RISK_SPEC.required_evidence.primary_fact_types:
+            all_facts_by_type[fact_type] = ctx.get_facts(fact_type)
+
+        # 应用 spec budget
+        max_facts = RISK_SPEC.budget.max_facts_per_type
+
+        # 提取 facts（应用 budget 限制）
+        hrs = all_facts_by_type.get("HIGH_RISK_SEQUENCE", [])[:max_facts]
+        swings = all_facts_by_type.get("ROUND_SWING", [])[:max_facts]
+        eco_collapses = all_facts_by_type.get("ECO_COLLAPSE_SEQUENCE", [])[:max_facts]
+
+        # 记录实际使用的 facts（用于调试）
+        total_facts_used = len(hrs) + len(swings) + len(eco_collapses)
 
         # Standard path: Strong evidence
         if len(hrs) >= 2:
