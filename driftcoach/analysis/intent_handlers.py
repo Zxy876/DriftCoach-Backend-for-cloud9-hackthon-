@@ -132,13 +132,18 @@ class RiskAssessmentHandler(IntentHandler):
         from driftcoach.specs.spec_schema import SpecRecognizer, RISK_SPEC
 
         # ✅ L5: BudgetController - CLRS Chapter 5 rational stopping
-        from driftcoach.analysis.budget_controller import (
-            BudgetController,
-            BudgetState,
-            ConfidenceTarget,
-            create_initial_state,
-            create_default_target,
-        )
+        # 🔧 Toggle: Set environment variable BUDGET_CONTROLLER_ENABLED=false to disable
+        import os
+        budget_controller_enabled = os.getenv("BUDGET_CONTROLLER_ENABLED", "true").lower() == "true"
+
+        if budget_controller_enabled:
+            from driftcoach.analysis.budget_controller import (
+                BudgetController,
+                BudgetState,
+                ConfidenceTarget,
+                create_initial_state,
+                create_default_target,
+            )
 
         # 获取所有 facts（按类型分组）
         all_facts_by_type = {}
@@ -164,38 +169,49 @@ class RiskAssessmentHandler(IntentHandler):
             for f in all_facts_by_type.get("ECO_COLLAPSE_SEQUENCE", [])[:max_facts]
         ])
 
-        # 初始化 BudgetController
-        controller = BudgetController()
-        budget = ctx.bounds.max_facts_total  # 从 L3 bounds 获取预算
-        state = create_initial_state(initial_confidence=0.0, budget=budget)
-        target = create_default_target(target_confidence=0.7)
-
         # 已挖掘的 facts（按类型分组）
         mined_hrs = []
         mined_swings = []
         mined_eco = []
 
-        # ✅ L5 核心循环：逐步挖掘，理性停止
-        for fact_type, fact in fact_candidates:
-            # 检查是否应该继续
-            if not controller.should_continue(state, target):
-                break
+        if budget_controller_enabled:
+            # ✅ L5 核心循环：逐步挖掘，理性停止
+            # 初始化 BudgetController
+            controller = BudgetController()
+            # Use max_findings_total as budget (L3 constraint)
+            budget = ctx.bounds.max_findings_total
+            state = create_initial_state(initial_confidence=0.0, budget=budget)
+            target = create_default_target(target_confidence=0.7)
 
-            # "挖掘"这个 fact（添加到已挖掘列表）
-            if fact_type == "HIGH_RISK_SEQUENCE":
-                mined_hrs.append(fact)
-            elif fact_type == "ROUND_SWING":
-                mined_swings.append(fact)
-            elif fact_type == "ECO_COLLAPSE_SEQUENCE":
-                mined_eco.append(fact)
+            for fact_type, fact in fact_candidates:
+                # 检查是否应该继续
+                if not controller.should_continue(state, target):
+                    break
 
-            # 更新状态
-            state.facts_mined += 1
-            state.remaining_budget -= 1
+                # "挖掘"这个 fact（添加到已挖掘列表）
+                if fact_type == "HIGH_RISK_SEQUENCE":
+                    mined_hrs.append(fact)
+                elif fact_type == "ROUND_SWING":
+                    mined_swings.append(fact)
+                elif fact_type == "ECO_COLLAPSE_SEQUENCE":
+                    mined_eco.append(fact)
 
-            # 计算新的 confidence（基于当前已挖掘的 facts）
-            new_confidence = self._calculate_confidence(mined_hrs, mined_swings)
-            state.update_confidence(new_confidence)
+                # 更新状态
+                state.facts_mined += 1
+                state.remaining_budget -= 1
+
+                # 计算新的 confidence（基于当前已挖掘的 facts）
+                new_confidence = self._calculate_confidence(mined_hrs, mined_swings)
+                state.update_confidence(new_confidence)
+        else:
+            # ❌ BudgetController 禁用：使用所有可用 facts（原行为）
+            for fact_type, fact in fact_candidates:
+                if fact_type == "HIGH_RISK_SEQUENCE":
+                    mined_hrs.append(fact)
+                elif fact_type == "ROUND_SWING":
+                    mined_swings.append(fact)
+                elif fact_type == "ECO_COLLAPSE_SEQUENCE":
+                    mined_eco.append(fact)
 
         # 循环结束 → 使用已挖掘的 facts 生成决策
         # 优先级判断
