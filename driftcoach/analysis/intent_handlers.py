@@ -134,9 +134,13 @@ class RiskAssessmentHandler(IntentHandler):
         # ✅ L5: BudgetController - CLRS Chapter 5 rational stopping
         # 🔧 Toggle: Set environment variable BUDGET_CONTROLLER_ENABLED=false to disable
         import os
-        budget_controller_enabled = os.getenv("BUDGET_CONTROLLER_ENABLED", "true").lower() == "true"
+        import logging
+        logger = logging.getLogger(__name__)
 
-        if budget_controller_enabled:
+        budget_controller_enabled = os.getenv("BUDGET_CONTROLLER_ENABLED", "true").lower() == "true"
+        shadow_mode = os.getenv("SHADOW_MODE", "false").lower() == "true"
+
+        if budget_controller_enabled or shadow_mode:
             from driftcoach.analysis.budget_controller import (
                 BudgetController,
                 BudgetState,
@@ -169,12 +173,68 @@ class RiskAssessmentHandler(IntentHandler):
             for f in all_facts_by_type.get("ECO_COLLAPSE_SEQUENCE", [])[:max_facts]
         ])
 
-        # 已挖掘的 facts（按类型分组）
-        mined_hrs = []
-        mined_swings = []
-        mined_eco = []
+        # ✅ Shadow Mode: 同时运行两个分支并记录 metrics
+        if shadow_mode:
+            logger.info("🔍 SHADOW_MODE_ENABLED: Running both WITH and WITHOUT BudgetController")
 
-        if budget_controller_enabled:
+            # Branch 1: WITH BudgetController
+            controller = BudgetController()
+            budget = ctx.bounds.max_findings_total
+            state_with = create_initial_state(initial_confidence=0.0, budget=budget)
+            target = create_default_target(target_confidence=0.7)
+
+            mined_hrs_with = []
+            mined_swings_with = []
+
+            for fact_type, fact in fact_candidates:
+                if not controller.should_continue(state_with, target):
+                    break
+                if fact_type == "HIGH_RISK_SEQUENCE":
+                    mined_hrs_with.append(fact)
+                elif fact_type == "ROUND_SWING":
+                    mined_swings_with.append(fact)
+                state_with.facts_mined += 1
+                state_with.remaining_budget -= 1
+                new_conf = self._calculate_confidence(mined_hrs_with, mined_swings_with)
+                state_with.update_confidence(new_conf)
+
+            # Branch 2: WITHOUT BudgetController (baseline)
+            mined_hrs_without = []
+            mined_swings_without = []
+            for fact_type, fact in fact_candidates:
+                if fact_type == "HIGH_RISK_SEQUENCE":
+                    mined_hrs_without.append(fact)
+                elif fact_type == "ROUND_SWING":
+                    mined_swings_without.append(fact)
+
+            # 记录 Shadow Metrics
+            shadow_metrics = {
+                "without_bc": {
+                    "facts_used": len(mined_hrs_without) + len(mined_swings_without),
+                    "hrs": len(mined_hrs_without),
+                    "swings": len(mined_swings_without),
+                },
+                "with_bc": {
+                    "facts_used": len(mined_hrs_with) + len(mined_swings_with),
+                    "hrs": len(mined_hrs_with),
+                    "swings": len(mined_swings_with),
+                    "confidence": state_with.current_confidence,
+                    "steps": state_with.facts_mined,
+                    "stopped_early": state_with.facts_mined < len(fact_candidates),
+                },
+                "efficiency": {
+                    "facts_saved": (len(mined_hrs_without) + len(mined_swings_without)) - (len(mined_hrs_with) + len(mined_swings_with)),
+                }
+            }
+
+            logger.info(f"🔍 SHADOW_METRICS: {shadow_metrics}")
+
+            # Shadow Mode: 返回 baseline (WITHOUT) 的结果
+            mined_hrs = mined_hrs_without
+            mined_swings = mined_swings_without
+            mined_eco = []
+
+        elif budget_controller_enabled:
             # ✅ L5 核心循环：逐步挖掘，理性停止
             # 初始化 BudgetController
             controller = BudgetController()
@@ -182,6 +242,11 @@ class RiskAssessmentHandler(IntentHandler):
             budget = ctx.bounds.max_findings_total
             state = create_initial_state(initial_confidence=0.0, budget=budget)
             target = create_default_target(target_confidence=0.7)
+
+            # 已挖掘的 facts（按类型分组）
+            mined_hrs = []
+            mined_swings = []
+            mined_eco = []
 
             for fact_type, fact in fact_candidates:
                 # 检查是否应该继续
@@ -205,6 +270,9 @@ class RiskAssessmentHandler(IntentHandler):
                 state.update_confidence(new_confidence)
         else:
             # ❌ BudgetController 禁用：使用所有可用 facts（原行为）
+            mined_hrs = []
+            mined_swings = []
+            mined_eco = []
             for fact_type, fact in fact_candidates:
                 if fact_type == "HIGH_RISK_SEQUENCE":
                     mined_hrs.append(fact)
