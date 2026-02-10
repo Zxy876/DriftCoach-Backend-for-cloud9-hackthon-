@@ -131,6 +131,15 @@ class RiskAssessmentHandler(IntentHandler):
         # 只使用 RISK_SPEC 允许的 facts
         from driftcoach.specs.spec_schema import SpecRecognizer, RISK_SPEC
 
+        # ✅ L5: BudgetController - CLRS Chapter 5 rational stopping
+        from driftcoach.analysis.budget_controller import (
+            BudgetController,
+            BudgetState,
+            ConfidenceTarget,
+            create_initial_state,
+            create_default_target,
+        )
+
         # 获取所有 facts（按类型分组）
         all_facts_by_type = {}
         for fact_type in RISK_SPEC.required_evidence.primary_fact_types:
@@ -139,31 +148,73 @@ class RiskAssessmentHandler(IntentHandler):
         # 应用 spec budget
         max_facts = RISK_SPEC.budget.max_facts_per_type
 
-        # 提取 facts（应用 budget 限制）
-        hrs = all_facts_by_type.get("HIGH_RISK_SEQUENCE", [])[:max_facts]
-        swings = all_facts_by_type.get("ROUND_SWING", [])[:max_facts]
-        eco_collapses = all_facts_by_type.get("ECO_COLLAPSE_SEQUENCE", [])[:max_facts]
+        # 创建 fact 候选列表（按优先级排序）
+        # 优先级：HIGH_RISK_SEQUENCE > ROUND_SWING > ECO_COLLAPSE_SEQUENCE
+        fact_candidates = []
+        fact_candidates.extend([
+            ("HIGH_RISK_SEQUENCE", f)
+            for f in all_facts_by_type.get("HIGH_RISK_SEQUENCE", [])[:max_facts]
+        ])
+        fact_candidates.extend([
+            ("ROUND_SWING", f)
+            for f in all_facts_by_type.get("ROUND_SWING", [])[:max_facts]
+        ])
+        fact_candidates.extend([
+            ("ECO_COLLAPSE_SEQUENCE", f)
+            for f in all_facts_by_type.get("ECO_COLLAPSE_SEQUENCE", [])[:max_facts]
+        ])
 
-        # 记录实际使用的 facts（用于调试）
-        total_facts_used = len(hrs) + len(swings) + len(eco_collapses)
+        # 初始化 BudgetController
+        controller = BudgetController()
+        budget = ctx.bounds.max_facts_total  # 从 L3 bounds 获取预算
+        state = create_initial_state(initial_confidence=0.0, budget=budget)
+        target = create_default_target(target_confidence=0.7)
 
-        # Standard path: Strong evidence
-        if len(hrs) >= 2:
+        # 已挖掘的 facts（按类型分组）
+        mined_hrs = []
+        mined_swings = []
+        mined_eco = []
+
+        # ✅ L5 核心循环：逐步挖掘，理性停止
+        for fact_type, fact in fact_candidates:
+            # 检查是否应该继续
+            if not controller.should_continue(state, target):
+                break
+
+            # "挖掘"这个 fact（添加到已挖掘列表）
+            if fact_type == "HIGH_RISK_SEQUENCE":
+                mined_hrs.append(fact)
+            elif fact_type == "ROUND_SWING":
+                mined_swings.append(fact)
+            elif fact_type == "ECO_COLLAPSE_SEQUENCE":
+                mined_eco.append(fact)
+
+            # 更新状态
+            state.facts_mined += 1
+            state.remaining_budget -= 1
+
+            # 计算新的 confidence（基于当前已挖掘的 facts）
+            new_confidence = self._calculate_confidence(mined_hrs, mined_swings)
+            state.update_confidence(new_confidence)
+
+        # 循环结束 → 使用已挖掘的 facts 生成决策
+        # 优先级判断
+        if len(mined_hrs) >= 2:
             return AnswerSynthesisResult(
                 claim="这是一场高风险对局",
                 verdict="YES",
                 confidence=0.9,
-                support_facts=self.get_support_facts(ctx, ["HIGH_RISK_SEQUENCE"], limit=3),
+                support_facts=self._format_facts(mined_hrs[:3]),
                 counter_facts=[],
                 followups=[]
             )
 
-        elif len(swings) >= 5:
+        elif len(mined_swings) >= 5:
             return AnswerSynthesisResult(
                 claim="这是一场高风险对局",
                 verdict="YES",
                 confidence=0.75,
-                support_facts=self.get_support_facts(ctx, ["ROUND_SWING"], limit=3),
+                support_facts=self._format_facts(mined_swings[:3]),
                 counter_facts=[],
                 followups=[]
             )
@@ -173,7 +224,7 @@ class RiskAssessmentHandler(IntentHandler):
             # Use DecisionMapper to generate degraded decision
             from driftcoach.analysis.decision_mapper import DecisionMapper, DecisionPath
 
-            available_facts = hrs + swings
+            available_facts = mined_hrs + mined_swings
 
             if available_facts:
                 # Create minimal context for decision mapper
@@ -189,7 +240,7 @@ class RiskAssessmentHandler(IntentHandler):
                 decision = mapper.map_to_decision(
                     context=context,
                     intent=ctx.intent,
-                    facts={"HIGH_RISK_SEQUENCE": hrs, "ROUND_SWING": swings},
+                    facts={"HIGH_RISK_SEQUENCE": mined_hrs, "ROUND_SWING": mined_swings},
                     bounds=ctx.bounds
                 )
 
@@ -210,11 +261,69 @@ class RiskAssessmentHandler(IntentHandler):
                     confidence=0.3,
                     support_facts=[],
                     counter_facts=[
-                        f"HIGH_RISK_SEQUENCE={len(hrs)}",
-                        f"ROUND_SWING={len(swings)}"
+                        f"HIGH_RISK_SEQUENCE={len(mined_hrs)}",
+                        f"ROUND_SWING={len(mined_swings)}"
                     ],
                     followups=["补充更多局数的风险片段", "核查关键局的输分原因"]
                 )
+
+    def _calculate_confidence(self, hrs: list, swings: list) -> float:
+        """
+        Calculate confidence based on mined facts.
+
+        This is a simplified heuristic for L5-MVP.
+        In production, this could use a more sophisticated model.
+
+        Args:
+            hrs: Mined HIGH_RISK_SEQUENCE facts
+            swings: Mined ROUND_SWING facts
+
+        Returns:
+            Estimated confidence (0.0 to 1.0)
+        """
+        # Start with base confidence
+        confidence = 0.0
+
+        # HIGH_RISK_SEQUENCE contributes strongly
+        if len(hrs) >= 2:
+            confidence = max(confidence, 0.9)
+        elif len(hrs) >= 1:
+            confidence = max(confidence, 0.6)
+
+        # ROUND_SWING contributes moderately
+        if len(swings) >= 5:
+            confidence = max(confidence, 0.75)
+        elif len(swings) >= 3:
+            confidence = max(confidence, 0.55)
+        elif len(swings) >= 1:
+            confidence = max(confidence, 0.35)
+
+        return confidence
+
+    def _format_facts(self, facts: list) -> List[str]:
+        """
+        Format facts into support strings.
+
+        Args:
+            facts: List of fact dictionaries
+
+        Returns:
+            List of formatted fact strings
+        """
+        if not facts:
+            return []
+
+        result = []
+        for fact in facts[:3]:  # Limit to 3 facts
+            note = fact.get("note", "")
+            rr = fact.get("round_range", [])
+            rr_str = f"R{rr[0]}-R{rr[1]}" if len(rr) == 2 else ""
+            r = fact.get("round", "")
+            r_str = f"R{r}" if r else ""
+            pieces = [p for p in [r_str, rr_str, note] if p]
+            result.append(" | ".join(pieces) if pieces else fact.get("fact_type", "fact"))
+
+        return result
 
 
 class EconomicCounterfactualHandler(IntentHandler):
