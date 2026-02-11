@@ -140,14 +140,14 @@ class RiskAssessmentHandler(IntentHandler):
         # 🔍 DEBUG: Log environment variables for troubleshooting
         bc_raw = os.getenv("BUDGET_CONTROLLER_ENABLED", "NOT_SET")
         shadow_raw = os.getenv("SHADOW_MODE", "NOT_SET")
-        logger.info(f"🔍 DEBUG_ENV: BUDGET_CONTROLLER_ENABLED='{bc_raw}'")
-        logger.info(f"🔍 DEBUG_ENV: SHADOW_MODE='{shadow_raw}'")
+        logger.warning(f"🔍 DEBUG_ENV: BUDGET_CONTROLLER_ENABLED='{bc_raw}'")
+        logger.warning(f"🔍 DEBUG_ENV: SHADOW_MODE='{shadow_raw}'")
 
         budget_controller_enabled = bc_raw.lower() == "true" if bc_raw != "NOT_SET" else True
         shadow_mode = shadow_raw.lower() == "true" if shadow_raw != "NOT_SET" else False
 
-        logger.info(f"🔍 DEBUG_EVAL: budget_controller_enabled={budget_controller_enabled}")
-        logger.info(f"🔍 DEBUG_EVAL: shadow_mode={shadow_mode}")
+        logger.warning(f"🔍 DEBUG_EVAL: budget_controller_enabled={budget_controller_enabled}")
+        logger.warning(f"🔍 DEBUG_EVAL: shadow_mode={shadow_mode}")
 
         if budget_controller_enabled or shadow_mode:
             from driftcoach.analysis.budget_controller import (
@@ -184,7 +184,7 @@ class RiskAssessmentHandler(IntentHandler):
 
         # ✅ Shadow Mode: 同时运行两个分支并记录 metrics
         if shadow_mode:
-            logger.info("🔍 SHADOW_MODE_ENABLED: Running both WITH and WITHOUT BudgetController")
+            logger.warning("🔍 SHADOW_MODE_ENABLED: Running both WITH and WITHOUT BudgetController")
 
             # Branch 1: WITH BudgetController
             controller = BudgetController()
@@ -236,7 +236,7 @@ class RiskAssessmentHandler(IntentHandler):
                 }
             }
 
-            logger.info(f"🔍 SHADOW_METRICS: {shadow_metrics}")
+            logger.warning(f"🔍 SHADOW_METRICS: {shadow_metrics}")
 
             # Shadow Mode: 返回 baseline (WITHOUT) 的结果
             mined_hrs = mined_hrs_without
