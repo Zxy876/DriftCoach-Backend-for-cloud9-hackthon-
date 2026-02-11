@@ -137,8 +137,17 @@ class RiskAssessmentHandler(IntentHandler):
         import logging
         logger = logging.getLogger(__name__)
 
-        budget_controller_enabled = os.getenv("BUDGET_CONTROLLER_ENABLED", "true").lower() == "true"
-        shadow_mode = os.getenv("SHADOW_MODE", "false").lower() == "true"
+        # 🔍 DEBUG: Log environment variables for troubleshooting
+        bc_raw = os.getenv("BUDGET_CONTROLLER_ENABLED", "NOT_SET")
+        shadow_raw = os.getenv("SHADOW_MODE", "NOT_SET")
+        logger.info(f"🔍 DEBUG_ENV: BUDGET_CONTROLLER_ENABLED='{bc_raw}'")
+        logger.info(f"🔍 DEBUG_ENV: SHADOW_MODE='{shadow_raw}'")
+
+        budget_controller_enabled = bc_raw.lower() == "true" if bc_raw != "NOT_SET" else True
+        shadow_mode = shadow_raw.lower() == "true" if shadow_raw != "NOT_SET" else False
+
+        logger.info(f"🔍 DEBUG_EVAL: budget_controller_enabled={budget_controller_enabled}")
+        logger.info(f"🔍 DEBUG_EVAL: shadow_mode={shadow_mode}")
 
         if budget_controller_enabled or shadow_mode:
             from driftcoach.analysis.budget_controller import (
