@@ -277,6 +277,19 @@ class RiskAssessmentHandler(IntentHandler):
                 # 计算新的 confidence（基于当前已挖掘的 facts）
                 new_confidence = self._calculate_confidence(mined_hrs, mined_swings)
                 state.update_confidence(new_confidence)
+
+            # 📊 Production Monitoring: Log BudgetController metrics
+            stopped_early = state.facts_mined < len(fact_candidates)
+            logger.warning(
+                f"📊 BC_METRICS: mode=PROD, "
+                f"facts_used={state.facts_mined}, "
+                f"facts_available={len(fact_candidates)}, "
+                f"hrs={len(mined_hrs)}, "
+                f"swings={len(mined_swings)}, "
+                f"confidence={state.current_confidence:.2f}, "
+                f"stopped_early={stopped_early}, "
+                f"steps={state.facts_mined}"
+            )
         else:
             # ❌ BudgetController 禁用：使用所有可用 facts（原行为）
             mined_hrs = []
